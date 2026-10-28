@@ -1,0 +1,61 @@
+#!/bin/sh /etc/rc.common
+# naiveproxy client managed by luci-app-naive-routing.
+# The client configuration is generated from UCI on every start, so the UCI
+# file is the single source of truth.
+#
+# START=99: after networking and firewall.
+
+START=99
+USE_PROCD=1
+
+PROG=/usr/bin/naive
+DEF_CONF=/var/etc/naive/config.json
+
+make_config() {
+	local proxy redir socks conc conf
+	proxy=$(uci -q get naive_routing.settings.proxy_url)
+	if [ -z "$proxy" ]; then
+		echo "naive-routing: option 'proxy_url' is not set" >&2
+		return 1
+	fi
+	redir=$(uci -q get naive_routing.settings.redir_port); [ -n "$redir" ] || redir=11090
+	socks=$(uci -q get naive_routing.settings.socks_port); [ -n "$socks" ] || socks=11081
+	conc=$(uci -q get naive_routing.settings.concurrency);  [ -n "$conc" ]  || conc=3
+	conf=$(uci -q get naive_routing.settings.naive_config);  [ -n "$conf" ]  || conf=$DEF_CONF
+
+	mkdir -p "$(dirname "$conf")"
+	cat > "$conf" <<EOF
+{
+  "listen": [
+    "redir://0.0.0.0:${redir}",
+    "socks://127.0.0.1:${socks}"
+  ],
+  "proxy": "${proxy}",
+  "insecure-concurrency": ${conc}
+}
+EOF
+	echo "$conf"
+}
+
+start_service() {
+	[ -x "$PROG" ] || { echo "naive-routing: $PROG not found" >&2; return 1; }
+	conf=$(make_config) || return 1
+
+	procd_open_instance
+	procd_set_param command "$PROG" "$conf"
+	procd_set_param user root
+	procd_set_param respawn 3600 5 5
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_set_param limits nofile="1048576 1048576"
+	procd_close_instance
+}
+
+service_triggers() {
+	procd_add_reload_trigger "naive_routing"
+}
+
+reload_service() {
+	stop
+	start
+}

@@ -1,0 +1,35 @@
+# Sets used by luci-app-naive-routing inside the fw4 table.
+#
+#   set_blocked — DYNAMIC. Filled by the DNS resolver (nftset) for domains from
+#                 the domain lists; that is where "goes through the tunnel" is
+#                 decided.
+#   set_static  — STATIC. Address lists for services that never use DNS
+#                 (messengers' data centres, CDNs). Loaded by the updater.
+#   set_direct  — DYNAMIC bypass. Its rule is placed BEFORE the intercept rules
+#                 in the nat chain, so the bypass wins over the big list and
+#                 list updates cannot break it.
+#
+# Separate sets on purpose: the DNS resolver keeps adding and expiring entries
+# in the dynamic sets, while the static lists are flushed and reloaded. Mixing
+# them in one set produces 'File exists' / 'No such file or directory' errors,
+# and nft -f is atomic — a single error discards the whole file.
+#
+# fw4 wraps this file into `table inet fw4 { ... }`; do not add table/chain here.
+
+set ru-blocked {
+    type ipv4_addr
+    flags interval
+    auto-merge
+}
+
+set ru-static {
+    type ipv4_addr
+    flags interval
+    auto-merge
+}
+
+set naive-direct {
+    type ipv4_addr
+    flags interval
+    auto-merge
+}

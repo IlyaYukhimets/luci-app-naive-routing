@@ -1,0 +1,32 @@
+{
+	"luci-app-naive-routing": {
+		"description": "View naiveproxy intercept state and manage routing lists",
+		"read": {
+			"file": {
+				"/tmp/naive_state": [ "read" ],
+				"/tmp/naive_exit_ip": [ "read" ],
+				"/tmp/naive_vps_ip": [ "read" ],
+				"/etc/naive-routing/direct_domains.txt": [ "read" ],
+				"/etc/naive-routing/proxy_domains.txt": [ "read" ],
+				"/etc/naive/direct_domains.txt": [ "read" ],
+				"/etc/naive/proxy_domains.txt": [ "read" ]
+			},
+			"ubus": {
+				"file": [ "read", "stat", "exec" ],
+				"service": [ "list" ]
+			}
+		},
+		"write": {
+			"file": {
+				"/etc/naive-routing/direct_domains.txt": [ "write" ],
+				"/etc/naive-routing/proxy_domains.txt": [ "write" ],
+				"/etc/naive/direct_domains.txt": [ "write" ],
+				"/etc/naive/proxy_domains.txt": [ "write" ],
+				"/usr/bin/naive-ctl": [ "exec" ]
+			},
+			"ubus": {
+				"file": [ "write", "exec" ]
+			}
+		}
+	}
+}

@@ -1,0 +1,173 @@
+msgid ""
+msgstr ""
+"Content-Type: text/plain; charset=UTF-8\n"
+"Project-Id-Version: luci-app-naive-routing\n"
+"PO-Revision-Date: 2026-10-28\n"
+"Last-Translator: Ilya Yukhimets\n"
+"Language-Team: Russian\n"
+"Language: ru\n"
+"MIME-Version: 1.0\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=3; plural=(n%10==1 && n%100!=11 ? 0 : n%10>=2 && "
+"n%10<=4 && (n%100<10 || n%100>=20) ? 1 : 2);\n"
+
+msgid "Naiveproxy Routing"
+msgstr "Маршрутизация naiveproxy"
+
+msgid "Routing state"
+msgstr "Состояние маршрутизации"
+
+msgid "State"
+msgstr "Состояние"
+
+msgid "Tunnel"
+msgstr "Туннель"
+
+msgid "Exit IP (through tunnel)"
+msgstr "Выходной IP (через туннель)"
+
+msgid "Server address"
+msgstr "Адрес сервера"
+
+msgid "DNS backend"
+msgstr "DNS-бэкенд"
+
+msgid "Rules"
+msgstr "Правила"
+
+msgid "Address sets"
+msgstr "Наборы адресов"
+
+msgid "Through the tunnel"
+msgstr "Прошло через туннель"
+
+msgid "Lists"
+msgstr "Списки"
+
+msgid "intercept enabled"
+msgstr "перехват включён"
+
+msgid "disabled manually"
+msgstr "выключен вручную"
+
+msgid "tunnel unavailable — traffic goes direct"
+msgstr "туннель недоступен — трафик напрямую"
+
+msgid "unknown"
+msgstr "неизвестно"
+
+msgid "not running"
+msgstr "не запущен"
+
+msgid "rules"
+msgstr "правила перехвата"
+
+msgid "processes"
+msgstr "процессов"
+
+msgid "connections"
+msgstr "соединений"
+
+msgid "not installed"
+msgstr "не установлен"
+
+msgid "Connections to the server (speed / stealth)"
+msgstr "Соединений к серверу (скорость / скрытность)"
+
+msgid "Apply and restart"
+msgstr "Применить и перезапустить"
+
+msgid "current"
+msgstr "сейчас"
+
+msgid "DNS backend (domain routing)"
+msgstr "DNS-бэкенд (маршрутизация по доменам)"
+
+msgid "Check backend"
+msgstr "Проверить бэкенд"
+
+msgid "Where will a domain go"
+msgstr "Куда пойдёт домен"
+
+msgid "Checks the lists and shows the decision: tunnel or direct."
+msgstr "Проверяет списки и показывает решение: туннель или напрямую."
+
+msgid "Check"
+msgstr "Проверить"
+
+msgid "goes through the tunnel"
+msgstr "через туннель"
+
+msgid "direct"
+msgstr "напрямую"
+
+msgid "Goes direct (tunnel bypass)"
+msgstr "Идут напрямую (обход туннеля)"
+
+msgid "Goes through the tunnel (own additions)"
+msgstr "Идут через туннель (свои добавки)"
+
+msgid "Save and apply"
+msgstr "Сохранить и применить"
+
+msgid ""
+"One domain per line, subdomains are inherited. Lines starting with # and "
+"empty lines are ignored; comments survive applying."
+msgstr ""
+"По одному домену в строке, поддомены наследуются. Строки с # и пустые "
+"игнорируются; комментарии сохраняются при применении."
+
+msgid "Bypass list applied, rules and domain sets reloaded"
+msgstr "Список обхода записан, правила и доменные наборы перечитаны"
+
+msgid "Tunnel list applied, rules and domain sets reloaded"
+msgstr "Список для туннеля записан, правила и доменные наборы перечитаны"
+
+msgid "Done"
+msgstr "Готово"
+
+msgid "Error"
+msgstr "Ошибка"
+
+msgid "Intercept is on"
+msgstr "Перехват включён"
+
+msgid "Intercept is off — traffic goes direct"
+msgstr "Перехват выключен — трафик идёт напрямую"
+
+msgid "Connections set to"
+msgstr "Соединений: "
+
+msgid "client restarted"
+msgstr "клиент перезапущен"
+
+msgid "DNS backend set to"
+msgstr "DNS-бэкенд: "
+
+msgid ""
+"Components are not installed: unable to read state from naive-ctl. Install "
+"the package or check that /usr/bin/naive-ctl is executable."
+msgstr ""
+"Компоненты не установлены: не удалось прочитать состояние из naive-ctl. "
+"Установите пакет или проверьте, что /usr/bin/naive-ctl исполняемый."
+
+msgid "Unable to write the list"
+msgstr "Не удалось записать список"
+
+msgid "Unable to check"
+msgstr "Не удалось проверить"
+
+msgid "QUIC (UDP 443) towards intercepted addresses"
+msgstr "QUIC (UDP 443) к перехватываемым адресам"
+
+msgid "reject (force TCP)"
+msgstr "отклонять (принудительно TCP)"
+
+msgid "send directly"
+msgstr "отправлять напрямую"
+
+msgid "QUIC policy set to"
+msgstr "Политика QUIC"
+
+msgid "naive carries TCP only, therefore UDP/443 cannot be proxied. With reject the client receives an ICMP port unreachable and switches to TCP, which is intercepted, within milliseconds; the hostname does not leave the router in plaintext. With send directly the packet is not touched: HTTP/3 keeps working for addresses reachable without the tunnel, while for a blocked destination the handshake fails at the provider and the hostname is visible to it, and the client falls back to TCP only after its own timeout."
+msgstr "naive передаёт только TCP, поэтому UDP/443 проксировать нечем. При отклонении клиент получает ICMP port unreachable и за миллисекунды переходит на TCP, который перехватывается; имя узла при этом не уходит от роутера открытым текстом. При отправке напрямую пакет не трогается: HTTP/3 продолжает работать для адресов, доступных без туннеля, но для заблокированного адреса рукопожатие обрывается у провайдера и имя узла ему видно, а клиент переходит на TCP только по своему таймауту."

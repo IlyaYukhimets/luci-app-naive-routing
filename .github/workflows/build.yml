@@ -1,0 +1,118 @@
+# SPDX-License-Identifier: MIT
+#
+# Builds the package with the official OpenWrt SDK container images and attaches
+# the result to the GitHub release on a version tag. The package contains shell
+# scripts and JavaScript only and is built with PKGARCH:=all, so one file per
+# release line covers every target architecture of that line.
+#
+#   apk - OpenWrt 25.x  (apk-tools)
+#   ipk - OpenWrt 24.10 and earlier (opkg)
+#
+# The steps below are the same ones verified manually against
+# openwrt/sdk:x86-64-openwrt-25.12. The action openwrt/gh-action-sdk is not used
+# on purpose: the SNAPSHOT SDK images ship staging_dir/host/bin/{gcc,g++} as
+# symlinks to a ccache wrapper that is not part of the tarball, so the host build
+# fails before the package is reached. The symlinks are repointed at the compiler
+# inside the image instead.
+
+name: Build packages
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: 25.12 apk
+            image: x86-64-openwrt-25.12
+            ext: apk
+          - name: 24.10 ipk
+            image: x86-64-openwrt-24.10
+            ext: ipk
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Build with the OpenWrt SDK
+        run: |
+          mkdir -p out
+          chmod 777 out
+          # /feed is mounted read-write: scripts/feeds writes index and
+          # .files-packageinfo.mk into the feed directory.
+          docker run --rm \
+            -v "$PWD":/feed \
+            -v "$PWD/out":/artifacts \
+            -e FILE_HOST=https://downloads.openwrt.org \
+            "openwrt/sdk:${{ matrix.image }}" \
+            bash -lc '
+              set -e
+              cd /builder
+
+              # The SDK tarball is not shipped inside the image; setup.sh
+              # downloads it and verifies the OpenWrt signature.
+              bash setup.sh
+
+              # Dangling host compiler symlinks (see the note at the top).
+              for f in gcc g++ cc; do
+                if [ -L "staging_dir/host/bin/$f" ] && [ ! -e "staging_dir/host/bin/$f" ]; then
+                  ln -sfn "$(command -v "gcc")" "staging_dir/host/bin/$f"
+                  echo "repointed staging_dir/host/bin/$f"
+                fi
+              done
+
+              # Feeds from GitHub mirrors, plus this repository as a local feed.
+              sed -e "s,https://git.openwrt.org/feed/,https://github.com/openwrt/," \
+                  -e "s,https://git.openwrt.org/openwrt/,https://github.com/openwrt/," \
+                  -e "s,https://git.openwrt.org/project/,https://github.com/openwrt/," \
+                  feeds.conf.default > feeds.conf
+              echo "src-link action /feed/" >> feeds.conf
+
+              ./scripts/feeds update -a
+              make defconfig
+              ./scripts/feeds install -p action -f luci-app-naive-routing
+              make package/luci-app-naive-routing/compile V=s -j"$(nproc)"
+
+              find bin/packages -type f -name "*.${{ matrix.ext }}" -exec cp -v {} /artifacts/ \;
+            '
+
+      - name: Check the artifact
+        run: |
+          ls -l out
+          test -n "$(ls -A out)"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: luci-app-naive-routing-${{ matrix.ext }}
+          path: out/*
+          if-no-files-found: error
+
+  release:
+    name: Attach packages to the release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v7
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish release assets
+        uses: softprops/action-gh-release@v3
+        with:
+          files: dist/*
+          generate_release_notes: true

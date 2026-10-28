@@ -1,0 +1,13 @@
+{
+	"admin/services/naive-routing": {
+		"title": "Naiveproxy Routing",
+		"order": 62,
+		"action": {
+			"type": "view",
+			"path": "naive_routing/overview"
+		},
+		"depends": {
+			"acl": [ "luci-app-naive-routing" ]
+		}
+	}
+}

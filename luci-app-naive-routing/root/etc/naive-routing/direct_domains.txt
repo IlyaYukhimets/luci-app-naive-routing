@@ -1,0 +1,8 @@
+# Domains that go DIRECT (bypass the tunnel).
+#
+# The bypass rule is placed before the intercept rules, so a domain that is in
+# both this list and the big intercept list goes direct. List updates cannot
+# break that.
+#
+# Format: one domain per line, subdomains are inherited. Lines starting with #
+# and empty lines are ignored. Comments survive applying from the LuCI page.

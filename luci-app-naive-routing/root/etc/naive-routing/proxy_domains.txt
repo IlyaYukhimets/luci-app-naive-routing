@@ -1,0 +1,7 @@
+# Domains that must go THROUGH the tunnel (own additions on top of the big list).
+#
+# The big list is maintained by the updater; put your own entries here.
+# To force a domain to go direct, use direct_domains.txt instead.
+#
+# Format: one domain per line, subdomains are inherited. Lines starting with #
+# and empty lines are ignored. Comments survive applying from the LuCI page.

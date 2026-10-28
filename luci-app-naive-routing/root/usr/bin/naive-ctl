@@ -1,0 +1,490 @@
+#!/bin/sh
+# ============================================================================
+# naive-ctl — управление перехватом naiveproxy на OpenWrt (fw4).
+#
+# Часть пакета luci-app-naive-routing. Единая точка входа для LuCI и консоли:
+#   naive-ctl status                   состояние (key=value, читается панелью)
+#   naive-ctl on | off                 включить/выключить перехват
+#   naive-ctl apply                    перечитать списки и применить
+#   naive-ctl check <домен>            куда пойдёт домен: туннель или напрямую
+#   naive-ctl set-concurrency <1-8>    число соединений к серверу + перезапуск
+#   naive-ctl set-dns <auto|smartdns|dnsmasq|none>  DNS-бэкенд
+#   naive-ctl dns-check                проверить, умеет ли DNS-бэкенд nftset
+#   naive-ctl list <proxy|direct>      показать список
+#
+# Архитектура: маршрутизация решается в ядре (nft redirect) по адресам
+# назначения. Домены превращаются в адреса DNS-сервером роутера, который при
+# резолве кладёт ответы в nft-наборы (nftset). Своего DNS-сервера пакет не
+# содержит: поддерживаются smartdns и штатный dnsmasq (нужен dnsmasq-full).
+# ============================================================================
+
+UCI_CONF="naive_routing"
+
+# --- значения по умолчанию (они же — путь к совместимости с уже настроенной
+# --- системой: если UCI-конфига нет, всё работает по этим путям) ---
+DEF_REDIR_PORT=11090
+DEF_SOCKS_PORT=11081
+DEF_CONCURRENCY=3
+DEF_NAIVE_CONF=/etc/naive/config.json
+DEF_INIT=/etc/init.d/naive
+DEF_HEALTH=/etc/naive/health.sh
+DEF_DIRECT=/etc/naive/direct_domains.txt
+DEF_PROXY=/etc/naive/proxy_domains.txt
+DEF_BIGLIST=/etc/smartdns/naive-blocked.txt
+DEF_SET_BLOCKED=ru-blocked
+DEF_SET_STATIC=ru-static
+DEF_SET_DIRECT=naive-direct
+DEF_CHAIN_NAT=nat_naive
+DEF_CHAIN_QUIC=quic_block
+DEF_DISABLED=/etc/naive/disabled
+DEF_STATE=/tmp/naive_state
+DEF_EXITFILE=/tmp/naive_exit_ip
+DEF_SMARTDNS_CUSTOM=/etc/smartdns/custom.conf
+DEF_DNSMASQ_DIR=/etc/dnsmasq.d
+DEF_DNSMASQ_FILE=/etc/dnsmasq.d/naive-routing.conf
+
+opt() {
+	# Read an option from UCI. Both layouts are accepted: the named section used
+	# by the shipped config (naive_routing.settings.<option>) and a bare named
+	# section (naive_routing.<option>), which hand-written configs often use.
+	v=$(uci -q get "$UCI_CONF.settings.$1" 2>/dev/null)
+	[ -n "$v" ] || v=$(uci -q get "$UCI_CONF.$1" 2>/dev/null)
+	[ -n "$v" ] || v="$2"
+	echo "$v"
+}
+
+REDIR_PORT=$(opt redir_port "$DEF_REDIR_PORT")
+SOCKS_PORT=$(opt socks_port "$DEF_SOCKS_PORT")
+CONCURRENCY=$(opt concurrency "$DEF_CONCURRENCY")
+NAIVE_CONF=$(opt naive_config "$DEF_NAIVE_CONF")
+INIT_NAIVE=$(opt init_script "$DEF_INIT")
+HEALTH=$(opt health_script "$DEF_HEALTH")
+DIRECT=$(opt direct_list "$DEF_DIRECT")
+PROXY=$(opt proxy_list "$DEF_PROXY")
+BIGLIST=$(opt big_list "$DEF_BIGLIST")
+SET_BLOCKED=$(opt set_blocked "$DEF_SET_BLOCKED")
+SET_STATIC=$(opt set_static "$DEF_SET_STATIC")
+SET_DIRECT=$(opt set_direct "$DEF_SET_DIRECT")
+CHAIN_NAT=$(opt chain_nat "$DEF_CHAIN_NAT")
+CHAIN_QUIC=$(opt chain_quic "$DEF_CHAIN_QUIC")
+DISABLED=$(opt disabled_flag "$DEF_DISABLED")
+STATE=$(opt state_file "$DEF_STATE")
+EXITFILE=$(opt exit_file "$DEF_EXITFILE")
+SMARTDNS_CUSTOM=$(opt smartdns_custom "$DEF_SMARTDNS_CUSTOM")
+DNSMASQ_DIR=$(opt dnsmasq_dir "$DEF_DNSMASQ_DIR")
+DNSMASQ_FILE=$(opt dnsmasq_file "$DEF_DNSMASQ_FILE")
+DNS_BACKEND_OPT=$(opt dns_backend "auto")
+QUIC_POLICY_OPT=$(opt quic_policy "reject")
+
+log() { logger -t naive-ctl "$*"; }
+
+# ---------------------------------------------------------------- утилиты ---
+
+cnt_set() {
+	nft list set inet fw4 "$1" 2>/dev/null \
+		| grep -oE '[0-9]{1,3}(\.[0-9]{1,3}){3}(/[0-9]+)?' | wc -l
+}
+
+counters() {
+	nft -j list chain inet fw4 "$CHAIN_NAT" 2>/dev/null | tr ',' '\n' \
+		| awk '
+			/"packets"/ { gsub(/[^0-9]/, "", $0); p += $0 }
+			/"bytes"/   { gsub(/[^0-9]/, "", $0); b += $0 }
+			END { printf "%d %d\n", p, b }'
+}
+
+# grep -c prints a count even when it matches nothing, and returns 1; the value
+# must not be doubled by an '|| echo 0' fallback.
+list_count() {
+	c=$(grep -vcE '^[[:space:]]*#|^[[:space:]]*$' "$1" 2>/dev/null)
+	echo "${c:-0}"
+}
+
+# Домены из файла/потока: только валидные, нижний регистр, без мусора.
+domains_of_file() {
+	[ -f "$1" ] || return 0
+	grep -vE '^[[:space:]]*#|^[[:space:]]*$' "$1" \
+		| awk '{print $1}' \
+		| sed -e 's|^[a-zA-Z]*://||' -e 's|/.*$||' -e 's|:[0-9]*$||' \
+		| tr 'A-Z' 'a-z' \
+		| grep -E '^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$' \
+		| sort -u
+}
+
+# --------------------------------------------------------------- DNS-слой ---
+
+# Какой DNS-сервер наполняет наборы. auto: наличие конфига и процесса smartdns,
+# иначе dnsmasq (он штатный), иначе none.
+dns_backend() {
+	case "$DNS_BACKEND_OPT" in
+		smartdns|dnsmasq|none) echo "$DNS_BACKEND_OPT"; return 0 ;;
+	esac
+	if [ -f "$SMARTDNS_CUSTOM" ] && pgrep -f "[s]martdns" >/dev/null 2>&1; then
+		echo smartdns
+	elif command -v dnsmasq >/dev/null 2>&1; then
+		echo dnsmasq
+	else
+		echo none
+	fi
+}
+
+# Умеет ли dnsmasq nftset (в базовой сборке OpenWrt он может отсутствовать,
+# нужен dnsmasq-full). Проверяем по строке собранных возможностей.
+dnsmasq_has_nftset() {
+	command -v dnsmasq >/dev/null 2>&1 || return 1
+	dnsmasq --version 2>/dev/null | grep -q "nftset" || return 1
+	return 0
+}
+
+dns_check_run() {
+	b=$(dns_backend)
+	echo "backend=$b"
+	case "$b" in
+	smartdns)
+		echo "ok=1"
+		[ -f "$SMARTDNS_CUSTOM" ] || { echo "ok=0"; echo "message=нет файла $SMARTDNS_CUSTOM"; }
+		;;
+	dnsmasq)
+		if dnsmasq_has_nftset; then
+			echo "ok=1"
+		else
+			echo "ok=0"
+			echo "message=dnsmasq собран без nftset — установите пакет dnsmasq-full"
+		fi
+		;;
+	*)
+		echo "ok=0"
+		echo "message=DNS-сервер не найден (нужен smartdns или dnsmasq-full)"
+		;;
+	esac
+}
+
+# --- smartdns: доменные наборы + привязка к nft-наборам ---
+dns_apply_smartdns() {
+	cat > "$SMARTDNS_CUSTOM" <<EOF
+# Generated by naive-ctl (luci-app-naive-routing). Local edits are overwritten.
+# Put your domains into ${DIRECT} and ${PROXY}.
+
+# --- перехват: большой список + свои добавки ---
+domain-set -name naive-blocked -type list -file ${BIGLIST}
+domain-set -name naive-extra -type list -file ${PROXY}
+nftset /domain-set:naive-blocked/#4:inet#fw4#${SET_BLOCKED}
+nftset /domain-set:naive-extra/#4:inet#fw4#${SET_BLOCKED}
+nftset-timeout 3600
+
+# Перехватываемым доменам AAAA не отдаём: naive работает только по IPv4/TCP,
+# иначе клиент ушёл бы по IPv6 мимо туннеля.
+domain-rules /domain-set:naive-blocked/ -address #6
+domain-rules /domain-set:naive-extra/ -address #6
+
+# --- обход: домены, которым туннель не нужен ---
+domain-set -name naive-direct -type list -file ${DIRECT}
+nftset /domain-set:naive-direct/#4:inet#fw4#${SET_DIRECT}
+EOF
+	/etc/init.d/smartdns reload >/dev/null 2>&1 || /etc/init.d/smartdns restart >/dev/null 2>&1
+}
+
+# --- dnsmasq: строки nftset в отдельном конфиге в conf-dir ---
+# Длинный список режем на строки примерно по 50 доменов: одна строка на 81k
+# доменов — лишний риск для парсера, а несколько директив на один набор
+# dnsmasq объединяет сам.
+dns_apply_dnsmasq() {
+	[ -d "$DNSMASQ_DIR" ] || mkdir -p "$DNSMASQ_DIR"
+
+	# conf-dir должен переживать перезагрузку: по умолчанию OpenWrt берёт
+	# /tmp/dnsmasq.d (tmpfs). Переводим на постоянный каталог, если он другой.
+	cur_dir=$(uci -q get dhcp.@dnsmasq[0].confdir)
+	if [ "$cur_dir" != "$DNSMASQ_DIR" ]; then
+		uci -q set "dhcp.@dnsmasq[0].confdir=$DNSMASQ_DIR"
+		uci -q commit dhcp
+		log "confdir dnsmasq: ${cur_dir:-/tmp/dnsmasq.d} -> $DNSMASQ_DIR"
+	fi
+
+	tmp="$DNSMASQ_FILE.tmp.$$"
+	{
+		echo "# Generated by naive-ctl (luci-app-naive-routing). Local edits are overwritten."
+		echo "# Put your domains into ${DIRECT} and ${PROXY}."
+		# $1 = файл со списком доменов, $2 = имя nft-набора
+		emit() {
+			[ -f "$1" ] || return 0
+			domains_of_file "$1" | awk -v set="$2" '
+				{ buf = buf "/" $1; n++
+				  if (n >= 50) { printf "nftset=%s/4#inet#fw4#%s\n", buf, set; buf = ""; n = 0 } }
+				END { if (n > 0) printf "nftset=%s/4#inet#fw4#%s\n", buf, set }'
+		}
+		emit "$BIGLIST" "$SET_BLOCKED"
+		emit "$PROXY" "$SET_BLOCKED"
+		emit "$DIRECT" "$SET_DIRECT"
+	} > "$tmp"
+
+	# не перезапускать dnsmasq, если ничего не изменилось
+	if [ -f "$DNSMASQ_FILE" ] && cmp -s "$tmp" "$DNSMASQ_FILE"; then
+		rm -f "$tmp"
+		return 0
+	fi
+	mv "$tmp" "$DNSMASQ_FILE"
+	/etc/init.d/dnsmasq reload >/dev/null 2>&1 || /etc/init.d/dnsmasq restart >/dev/null 2>&1
+}
+
+dns_apply() {
+	b=$(dns_backend)
+	case "$b" in
+	smartdns) dns_apply_smartdns ;;
+	dnsmasq)
+		if dnsmasq_has_nftset; then
+			dns_apply_dnsmasq
+		else
+			log "dnsmasq без nftset: списки доменов не будут работать (нужен dnsmasq-full)"
+		fi
+		;;
+	*) log "DNS-бэкенд не найден: доменная маршрутизация недоступна" ;;
+	esac
+	echo "$b"
+}
+
+# Временный резолв доменов обхода, чтобы их адреса сразу попали в набор.
+dns_prewarm() {
+	[ -f "$DIRECT" ] || return 0
+	command -v nslookup >/dev/null 2>&1 || return 0
+	domains_of_file "$DIRECT" | head -200 | while read -r d; do
+		nslookup "$d" 127.0.0.1 >/dev/null 2>&1
+	done
+}
+
+# ---------------------------------------------------------------- статус ----
+
+do_status() {
+	st=$(cat "$STATE" 2>/dev/null || echo unknown)
+	[ -e "$DISABLED" ] && en=0 || en=1
+	exit_ip=$(cat "$EXITFILE" 2>/dev/null)
+	vps_ip=$(cat /tmp/naive_vps_ip 2>/dev/null)
+	pid=$(pgrep -f "/usr/bin/[n]aive" 2>/dev/null | head -1)
+	set -- $(counters)
+	rules=$(nft list chain inet fw4 "$CHAIN_NAT" 2>/dev/null | grep -c 'redirect to')
+	inst=$(pidof naive 2>/dev/null | wc -w)
+	conc=$(grep -o '"insecure-concurrency"[[:space:]]*:[[:space:]]*[0-9]*' "$NAIVE_CONF" 2>/dev/null \
+		| grep -oE '[0-9]+$')
+	backend=$(dns_backend)
+	echo "state=$st"
+	echo "enabled=$en"
+	echo "tunnel_pid=${pid:-0}"
+	echo "instances=${inst:-0}"
+	echo "concurrency=${conc:-$CONCURRENCY}"
+	echo "dns_backend=$backend"
+	echo "dns_backend_opt=$DNS_BACKEND_OPT"
+	echo "quic_policy=$QUIC_POLICY_OPT"
+	echo "exit_ip=${exit_ip:-}"
+	echo "vps_ip=${vps_ip:-}"
+	echo "rules=${rules:-0}"
+	echo "set_blocked=$(cnt_set "$SET_BLOCKED")"
+	echo "set_static=$(cnt_set "$SET_STATIC")"
+	echo "set_direct=$(cnt_set "$SET_DIRECT")"
+	echo "direct_lines=$(list_count "$DIRECT")"
+	echo "proxy_lines=$(list_count "$PROXY")"
+	echo "biglist_lines=$(list_count "$BIGLIST")"
+	echo "biglist_date=$(date -r "$BIGLIST" +%Y-%m-%d 2>/dev/null || echo '')"
+	echo "packets=${1:-0}"
+	echo "bytes=${2:-0}"
+}
+
+# ------------------------------------------------------------- нормализация -
+
+# Чистим список: строки-комментарии и пустые сохраняются, домены нормализуются,
+# мусор отбрасывается, дубликаты убираются. Порядок строк сохраняется.
+normalize_list() {
+	f="$1"
+	[ -f "$f" ] || return 0
+	tmp="$f.tmp.$$"
+	: > "$tmp"
+	while IFS= read -r line; do
+		case "$line" in
+			''|'#'*)
+				printf '%s\n' "$line" >> "$tmp"
+				continue
+				;;
+		esac
+		d=$(printf '%s' "$line" \
+			| sed -e 's/#.*//' \
+			      -e 's|^[a-zA-Z]*://||' \
+			      -e 's|/.*$||' \
+			      -e 's|:[0-9]*$||' \
+			| awk '{print $1}' \
+			| tr 'A-Z' 'a-z')
+		printf '%s\n' "$d" | grep -qE '^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$' && \
+			printf '%s\n' "$d" >> "$tmp"
+	done < "$f"
+	awk '!seen[$0]++ || /^#/ || /^$/' "$tmp" > "$tmp.u" && mv "$tmp.u" "$tmp"
+	mv "$tmp" "$f"
+	rm -f "$tmp.u"
+}
+
+do_apply() {
+	normalize_list "$DIRECT"
+	normalize_list "$PROXY"
+	# Порядок важен: наборы и правила создаёт health.sh, и только потом DNS
+	# получает привязки (smartdns регистрирует nftset лишь для существующего набора).
+	sh "$HEALTH" >/dev/null 2>&1
+	sleep 1
+	backend=$(dns_apply)
+	sleep 3
+	sh "$HEALTH" >/dev/null 2>&1
+	dns_prewarm
+	log "lists applied: direct=$(list_count "$DIRECT") proxy=$(list_count "$PROXY") backend=$backend"
+	echo "backend=$backend"
+	do_status
+}
+
+# ---------------------------------------------------------------- проверка ---
+
+do_check() {
+	d=$(echo "$1" | tr 'A-Z' 'a-z' | sed -e 's|^[a-zA-Z]*://||' -e 's|/.*$||' -e 's|:[0-9]*$||')
+	[ -z "$d" ] && { echo "ok=0"; echo "message=empty domain"; return 0; }
+	verdict="direct"
+	why="not in any list -> direct"
+	if grep -qiE "(^|\.)${d}$" "$DIRECT" 2>/dev/null; then
+		verdict="direct"; why="in the bypass list"
+	elif grep -qiE "(^|\.)${d}$" "$PROXY" 2>/dev/null; then
+		verdict="tunnel"; why="in your tunnel additions"
+	elif grep -qiE "(^|\.)${d}$" "$BIGLIST" 2>/dev/null; then
+		verdict="tunnel"; why="in the big intercept list"
+	fi
+	ips=$(nslookup -type=A "$d" 127.0.0.1 2>/dev/null \
+		| awk '/^Address[ 0-9]*:/ {print $NF}' \
+		| grep -E '^[0-9]{1,3}(\.[0-9]{1,3}){3}$' | head -4 | tr '\n' ' ')
+	echo "ok=1"
+	echo "domain=$d"
+	echo "verdict=$verdict"
+	echo "why=$why"
+	echo "ips=${ips:-none}"
+}
+
+# ------------------------------------------------------------- переключение --
+
+# Write an option into the section that actually exists in the config.
+set_uci() {
+	for sec in "$UCI_CONF.settings" "$UCI_CONF"; do
+		if uci -q get "$sec" >/dev/null 2>&1; then
+			uci -q set "$sec.$1=$2" && uci -q commit "$UCI_CONF"
+			return 0
+		fi
+	done
+	uci -q set "$UCI_CONF.$1=$2" && uci -q commit "$UCI_CONF"
+}
+
+do_set_quic() {
+	case "$1" in
+	reject|direct) ;;
+	*)
+		echo "ok=0"
+		echo "message=expected reject or direct"
+		exit 1
+		;;
+	esac
+	set_uci quic_policy "$1"
+	QUIC_POLICY_OPT="$1"
+	sh "$HEALTH" >/dev/null 2>&1
+	echo "ok=1"
+	echo "quic_policy=$1"
+}
+
+do_set_dns() {
+	case "$1" in
+	auto|smartdns|dnsmasq|none) ;;
+	*) echo "ok=0"; echo "message=допустимо: auto, smartdns, dnsmasq, none"; \
+	   echo "допустимо: auto, smartdns, dnsmasq, none" >&2; return 1 ;;
+	esac
+	set_uci dns_backend "$1"
+	DNS_BACKEND_OPT="$1"
+	do_apply >/dev/null 2>&1
+	log "dns_backend: $1"
+	echo "ok=1"
+	echo "dns_backend_opt=$1"
+	echo "dns_backend=$(dns_backend)"
+}
+
+wait_tunnel() {
+	i=0
+	while [ "$i" -lt 4 ]; do
+		ip=$(curl -s -m 4 --socks5-hostname "127.0.0.1:$SOCKS_PORT" \
+			https://1.1.1.1/cdn-cgi/trace 2>/dev/null \
+			| grep '^ip=' | head -1 | cut -d= -f2)
+		[ -n "$ip" ] && { echo "$ip"; return 0; }
+		sleep 1
+		i=$((i + 1))
+	done
+	return 1
+}
+
+do_set_concurrency() {
+	n="$1"
+	case "$n" in
+		''|*[!0-9]*) echo "ok=0"; echo "message=нужно целое число"; \
+		              echo "нужно целое число" >&2; return 1 ;;
+	esac
+	if [ "$n" -lt 1 ] || [ "$n" -gt 8 ]; then
+		echo "ok=0"; echo "message=допустимо от 1 до 8 (автор рекомендует не больше 4)"; \
+		echo "допустимо от 1 до 8, автор рекомендует не больше 4" >&2; return 1
+	fi
+
+	prev=$(grep -o '"insecure-concurrency"[[:space:]]*:[[:space:]]*[0-9]*' "$NAIVE_CONF" 2>/dev/null \
+		| grep -oE '[0-9]+$')
+	[ -z "$prev" ] && prev=1
+
+	tmp="$NAIVE_CONF.new.$$"
+	if grep -q '"insecure-concurrency"' "$NAIVE_CONF" 2>/dev/null; then
+		sed "s/\(\"insecure-concurrency\"[[:space:]]*:[[:space:]]*\)[0-9]*/\1$n/" "$NAIVE_CONF" > "$tmp"
+	else
+		sed "\$i\\
+  \"insecure-concurrency\": $n," "$NAIVE_CONF" > "$tmp"
+	fi
+
+	if ! jsonfilter -e '@.listen' < "$tmp" >/dev/null 2>&1; then
+		rm -f "$tmp"
+		echo "ok=0"; echo "message=получился невалидный JSON, конфиг не тронут"; \
+		echo "получился невалидный JSON, конфиг не тронут" >&2; return 1
+	fi
+	mv "$tmp" "$NAIVE_CONF"
+	set_uci concurrency "$n"
+
+	"$INIT_NAIVE" restart >/dev/null 2>&1
+	if ip=$(wait_tunnel); then
+		sh "$HEALTH" >/dev/null 2>&1
+		log "insecure-concurrency: $prev -> $n (туннель ok, exit=$ip)"
+		echo "ok=1"; echo "previous=$prev"; echo "concurrency=$n"; echo "exit_ip=$ip"
+		return 0
+	fi
+
+	sed "s/\(\"insecure-concurrency\"[[:space:]]*:[[:space:]]*\)[0-9]*/\1$prev/" "$NAIVE_CONF" > "$tmp" \
+		&& mv "$tmp" "$NAIVE_CONF"
+	"$INIT_NAIVE" restart >/dev/null 2>&1
+	wait_tunnel >/dev/null || true
+	sh "$HEALTH" >/dev/null 2>&1
+	log "insecure-concurrency: $n не поднялся, откат на $prev"
+	echo "ok=0"; echo "message=с $n соединениями туннель не поднялся, вернул $prev"; \
+	echo "с $n соединениями туннель не поднялся, вернул $prev" >&2
+	return 1
+}
+
+# ------------------------------------------------------------------ вход ----
+
+case "$1" in
+	status)          do_status ;;
+	on)              rm -f "$DISABLED"; sh "$HEALTH" >/dev/null 2>&1; do_status ;;
+	off)             : > "$DISABLED";  sh "$HEALTH" >/dev/null 2>&1; do_status ;;
+	apply)           do_apply ;;
+	check)           do_check "$2" ;;
+	dns-check)       dns_check_run ;;
+	set-quic) do_set_quic "$2" ;;
+	set-dns)         do_set_dns "$2" ;;
+	set-concurrency) do_set_concurrency "$2" ;;
+	list)
+		case "$2" in
+			proxy)  grep -vE '^[[:space:]]*$' "$PROXY" 2>/dev/null ;;
+			direct) grep -vE '^[[:space:]]*$' "$DIRECT" 2>/dev/null ;;
+			*) echo "usage: naive-ctl list proxy|direct" >&2; exit 2 ;;
+		esac ;;
+	*)
+		echo "usage: naive-ctl status|on|off|apply|check <домен>|set-concurrency <1-8>|set-dns <auto|smartdns|dnsmasq|none>|dns-check|list proxy|direct" >&2
+		exit 2 ;;
+esac
+exit 0

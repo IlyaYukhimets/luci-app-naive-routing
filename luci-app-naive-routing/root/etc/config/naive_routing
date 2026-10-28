@@ -1,0 +1,58 @@
+config naive_routing 'settings'
+	option enabled '1'
+
+	# Upstream naive server. Credentials are part of the URL:
+	#   https://user:password@vps.example.com
+	option proxy_url ''
+
+	# Optional: pin the server address instead of resolving vps_domain.
+	option vps_domain 'vps.example.com'
+	option vps_ip ''
+
+	# Ports: redirect target for intercepted TCP, SOCKS for probes.
+	option redir_port '11090'
+	option socks_port '11081'
+
+	# Parallel TLS connections to the server ("insecure-concurrency").
+	# 1 = most browser-like, up to 4 recommended by the naive author.
+	option concurrency '3'
+
+	# auto | smartdns | dnsmasq | none
+	option dns_backend 'auto'
+	# reject: UDP/443 towards intercepted addresses is answered with an ICMP port
+	# unreachable, so clients switch to TCP (which is intercepted) at once.
+	# direct: UDP/443 is left untouched.
+	option quic_policy 'reject'
+
+	# Lists. Domain lists feed the dynamic sets through the DNS resolver.
+	option big_list '/etc/naive-routing/blocked_domains.txt'
+	option direct_list '/etc/naive-routing/direct_domains.txt'
+	option proxy_list '/etc/naive-routing/proxy_domains.txt'
+
+	# Static address lists (services that do not use DNS at all).
+	option static_ips '/etc/naive-routing/blocked_ips.nft'
+	option static_ranges '/etc/naive-routing/ranges_ipv4.nft'
+
+	# Runtime
+	option init_script '/etc/init.d/naive-routing'
+	option naive_config '/var/etc/naive/config.json'
+	option health_script '/usr/libexec/naive-routing/health.sh'
+	option disabled_flag '/etc/naive-routing/disabled'
+	option state_file '/tmp/naive_state'
+	option exit_file '/tmp/naive_exit_ip'
+
+	# nft objects (override only if they clash with an existing setup)
+	option chain_nat 'nat_naive'
+	option chain_quic 'quic_block'
+	option set_blocked 'ru-blocked'
+	option set_static 'ru-static'
+	option set_direct 'naive-direct'
+
+	# DNS backend specific paths
+	option smartdns_custom '/etc/smartdns/custom.conf'
+	option dnsmasq_dir '/etc/dnsmasq.d'
+	option dnsmasq_file '/etc/dnsmasq.d/naive-routing.conf'
+
+	# Updater thresholds (guards against truncated downloads)
+	option domains_min_entries '20000'
+	option ips_min_entries '1000'

@@ -110,11 +110,11 @@ line.
 
 ```
 # OpenWrt 24.10 and earlier
-opkg update && opkg install ./luci-app-naive-routing_1.0.0-1_all.ipk
+opkg update && opkg install ./luci-app-naive-routing_1.0.1-r1_all.ipk
 
 # OpenWrt 25.x: the artifacts are not signed by a key present in the router, hence
 # --allow-untrusted
-apk add --allow-untrusted ./luci-app-naive-routing-1.0.0-r1.apk
+apk add --allow-untrusted ./luci-app-naive-routing-1.0.1-r1.apk
 ```
 
 The `naiveproxy` client is not included and is not pulled in automatically, see

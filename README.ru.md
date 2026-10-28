@@ -109,11 +109,11 @@ SDK, результаты прикрепляются к релизу:
 
 ```
 # OpenWrt 24.10 и ранее
-opkg update && opkg install ./luci-app-naive-routing_1.0.0-1_all.ipk
+opkg update && opkg install ./luci-app-naive-routing_1.0.1-r1_all.ipk
 
 # OpenWrt 25.x: артефакты не подписаны ключом, присутствующим на роутере,
 # поэтому нужен --allow-untrusted
-apk add --allow-untrusted ./luci-app-naive-routing-1.0.0-r1.apk
+apk add --allow-untrusted ./luci-app-naive-routing-1.0.1-r1.apk
 ```
 
 Клиент `naiveproxy` в пакет не входит и автоматически не устанавливается, см. раздел

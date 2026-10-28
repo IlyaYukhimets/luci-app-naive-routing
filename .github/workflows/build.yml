@@ -84,7 +84,12 @@ jobs:
               ./scripts/feeds install -p action -f luci-app-naive-routing
               make package/luci-app-naive-routing/compile V=s -j"$(nproc)"
 
-              find bin/packages -type f -name "*.${{ matrix.ext }}" -exec cp -v {} /artifacts/ \;
+              # Only this package and the i18n catalog that luci.mk generates
+              # from po/. Everything else under bin/packages are build-time
+              # dependencies of the package and do not belong to the release.
+              find bin/packages -type f -name "*.${{ matrix.ext }}" \
+                \( -name "luci-app-naive-routing*" -o -name "luci-i18n-naive-routing*" \) \
+                -exec cp -v {} /artifacts/ \;
             '
 
       - name: Check the artifact

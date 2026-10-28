@@ -109,11 +109,11 @@ SDK, результаты прикрепляются к релизу:
 
 ```
 # OpenWrt 24.10 и ранее
-opkg update && opkg install ./luci-app-naive-routing_1.0.1-r1_all.ipk
+opkg update && opkg install ./luci-app-naive-routing_1.0.2-r1_all.ipk
 
 # OpenWrt 25.x: артефакты не подписаны ключом, присутствующим на роутере,
 # поэтому нужен --allow-untrusted
-apk add --allow-untrusted ./luci-app-naive-routing-1.0.1-r1.apk
+apk add --allow-untrusted ./luci-app-naive-routing-1.0.2-r1.apk
 ```
 
 Клиент `naiveproxy` в пакет не входит и автоматически не устанавливается, см. раздел
@@ -163,7 +163,73 @@ ssh root@router 'cd /tmp/luci-app-naive-routing && ./install.sh'
 службы. `./install.sh uninstall` удаляет файлы приложения, сохраняя
 `/etc/config/naive_routing` и `/etc/naive-routing`.
 
-### Настройка
+### Клиент naiveproxy
+
+Пакет не содержит клиентский бинарь и не подтягивает его из фида: `naiveproxy`
+отсутствует в официальных фидах OpenWrt. Устанавливается из релиза upstream,
+соответствующего архитектуре цели:
+
+```
+arch=$( . /etc/openwrt_release; echo $DISTRIB_ARCH )
+ver=v154.0.8037.49-5
+wget -O /tmp/naive.tar.xz \
+  "https://github.com/klzgrad/naiveproxy/releases/download/$ver/naiveproxy-$ver-openwrt-$arch-static.tar.xz"
+tar -xJf /tmp/naive.tar.xz -C /tmp
+install -m 755 /tmp/naiveproxy-$ver-openwrt-$arch-static/naive /usr/bin/naive
+```
+
+Два момента, на которых легко ошибиться:
+
+* Нужен артефакт `openwrt-<arch>-static`. Артефакты `linux-*` собраны динамически
+  против glibc и в OpenWrt не запускаются — оболочка отвечает `not found`, так как
+  в системе musl.
+* `naive --version` печатает только версию Chromium (`154.0.8037.49`); суффикс
+  релиза (`-5`, `-4`) в рантайме не виден. Уровень патча проверяется по контрольной
+  сумме скачанного архива, а не по `--version`.
+
+## Расписание
+
+Сторожевой скрипт и обновляторы списков запускаются init-скриптом как процессы под
+управлением procd, поэтому записи в cron не создаются и чистая установка не требует
+ручной настройки:
+
+* `watchdog` вызывает `health.sh` каждые `watchdog_interval` секунд (по умолчанию 60);
+* `lists` вызывает `update-ips.sh` и `update-domains.sh` раз в сутки в
+  `update_hour`:`update_min` (по умолчанию 03:30 по локальному времени).
+
+Оба управляются из `/etc/config/naive_routing`:
+
+```
+uci set naive_routing.settings.watchdog='1'
+uci set naive_routing.settings.watchdog_interval='60'
+uci set naive_routing.settings.update_lists='1'
+uci set naive_routing.settings.update_hour='3'
+uci set naive_routing.settings.update_min='30'
+uci commit naive_routing && /etc/init.d/naive-routing restart
+```
+
+## Переход с ручной установки
+
+Если файлы раскладывались вручную, их нужно удалить до установки пакета, иначе они
+остаются неотслеживаемыми и при обновлении остаются устаревшие копии:
+
+```
+cp /etc/config/naive_routing /root/naive_routing.backup
+rm -rf /usr/libexec/naive-routing /www/luci-static/resources/view/naive_routing
+rm -f /usr/bin/naive-ctl /etc/nftables.d/10-naive-sets.nft
+rm -f /usr/share/luci/menu.d/luci-app-naive-routing.json \
+      /usr/share/rpcd/acl.d/luci-app-naive-routing.json
+sed -i '/naive-routing\|naive-ctl/d' /etc/crontabs/root    # записи cron ручной установки
+/etc/init.d/naive stop; /etc/init.d/naive disable 2>/dev/null   # init-скрипт, написанный вручную
+apk add --allow-untrusted ./luci-app-naive-routing-1.0.2-r1.apk
+cp /root/naive_routing.backup /etc/config/naive_routing
+/etc/init.d/naive-routing enable && /etc/init.d/naive-routing start
+```
+
+`/etc/config/naive_routing` сохраняется намеренно: в нём адрес туннеля, порты и
+политики, а конфигурация пакета по умолчанию содержит пустые значения.
+
+## Настройка
 
 ```
 uci set naive_routing.settings.proxy_url='https://user:password@vps.example.com'

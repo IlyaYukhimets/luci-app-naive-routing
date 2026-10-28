@@ -10,6 +10,7 @@ USE_PROCD=1
 
 PROG=/usr/bin/naive
 DEF_CONF=/var/etc/naive/config.json
+LIBEXEC=/usr/libexec/naive-routing
 
 make_config() {
 	local proxy redir socks conc conf
@@ -37,6 +38,21 @@ EOF
 	echo "$conf"
 }
 
+opt() {
+	uci -q get "naive_routing.settings.$1" || uci -q get "naive_routing.$1"
+}
+
+# Minutes until the next occurrence of HH:MM, used to schedule the list updaters
+# without depending on cron.
+minutes_until() {
+	local now target
+	now=$(( $(date +%H | sed "s/^0//") * 60 + $(date +%M | sed "s/^0//") ))
+	target=$(( $1 * 60 + $2 ))
+	local delta=$(( (target - now + 1440) % 1440 ))
+	[ "$delta" -eq 0 ] && delta=1440
+	echo "$delta"
+}
+
 start_service() {
 	[ -x "$PROG" ] || { echo "naive-routing: $PROG not found" >&2; return 1; }
 	conf=$(make_config) || return 1
@@ -49,6 +65,36 @@ start_service() {
 	procd_set_param stderr 1
 	procd_set_param limits nofile="1048576 1048576"
 	procd_close_instance
+
+	# Watchdog: keeps the nftables interception in sync with the real exit IP.
+	# Scheduled here rather than through cron so the package has no dependency
+	# on the crontab and survives a fresh install without manual setup.
+	local wd int
+	wd=$(opt watchdog); [ -n "$wd" ] || wd=1
+	int=$(opt watchdog_interval); [ -n "$int" ] || int=60
+	if [ "$wd" = "1" ]; then
+		procd_open_instance watchdog
+		procd_set_param command /bin/sh -c "while :; do $LIBEXEC/health.sh >/dev/null 2>&1; sleep $int; done"
+		procd_set_param respawn 3600 5 5
+		procd_close_instance
+	fi
+
+	# Nightly refresh of the address and domain lists.
+	local uh um upd
+	upd=$(opt update_lists); [ -n "$upd" ] || upd=1
+	uh=$(opt update_hour); [ -n "$uh" ] || uh=3
+	um=$(opt update_min);  [ -n "$um" ] || um=30
+	if [ "$upd" = "1" ]; then
+		local wait
+		wait=$(minutes_until "$uh" "$um")
+		procd_open_instance lists
+		procd_set_param command /bin/sh -c "sleep $((delay * 60)); while :; do \
+			$LIBEXEC/update-ips.sh >/dev/null 2>&1; \
+			$LIBEXEC/update-domains.sh >/dev/null 2>&1; \
+			sleep 86400; done"
+		procd_set_param respawn 3600 5 5
+		procd_close_instance
+	fi
 }
 
 service_triggers() {

@@ -56,3 +56,11 @@ config naive_routing 'settings'
 	# Updater thresholds (guards against truncated downloads)
 	option domains_min_entries '20000'
 	option ips_min_entries '1000'
+	# Watchdog keeps the nftables interception in sync with the real exit IP
+	option watchdog '1'
+	option watchdog_interval '60'
+
+	# Nightly refresh of the address and domain lists (local time)
+	option update_lists '1'
+	option update_hour '3'
+	option update_min '30'

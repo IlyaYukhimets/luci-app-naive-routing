@@ -1,175 +1,177 @@
-**English** | [Русский](README.ru.md)
+[English](README.en.md) | **Русский**
 
 # luci-app-naive-routing
 
-Domain-based split routing for [naiveproxy](https://github.com/klzgrad/naiveproxy) on OpenWrt.
-The kernel intercepts only the destinations that the routing lists select; all other
-traffic stays on the direct path. If the tunnel stops working, the intercept is removed
-automatically, so connectivity never depends on the proxy.
+Маршрутизация по доменам для [naiveproxy](https://github.com/klzgrad/naiveproxy) на OpenWrt.
+Ядро перехватывает только те адреса назначения, которые выбраны списками маршрутизации;
+остальной трафик идёт напрямую. При отказе туннеля перехват снимается автоматически,
+поэтому связность не зависит от прокси.
 
-LuCI page: state, on/off switch, connection count, domain decision lookup, editable lists.
+Страница LuCI состоит из трёх вкладок: «Основное» (состояние и переключатель перехвата),
+«Настройки» (параметры клиента, DNS-бэкенд, политика QUIC) и «Маршруты» (проверка решения
+по домену и редактирование списков). Пояснения к параметрам вынесены в подсказки, чтобы
+страница оставалась читаемой.
 
 ---
 
-## Design
+## Устройство
 
-Routing is decided in three layers.
+Маршрутизация решается на трёх уровнях.
 
-**1. Domain → address (DNS resolver).** The package does not ship a DNS server. It plugs
-into the resolver that is already running and hands it the domain lists. On every
-resolution of a listed domain the resolver adds the resulting A records to an nftables
-set. Only domains that are actually visited are resolved, so a list of 80 000 entries
-does not require 80 000 lookups per day.
+**1. Домен → адрес (DNS-сервер).** Пакет не содержит собственного DNS-сервера. Он
+подключается к тому резолверу, который уже работает, и передаёт ему доменные списки. При
+каждом резолве домена из списка резолвер добавляет полученные A-записи в набор nftables.
+Разрешаются только фактически посещаемые домены, поэтому список из 80 000 записей не
+требует 80 000 запросов в сутки.
 
-**2. Address → set (nftables).** Three sets exist in the `inet fw4` table:
+**2. Адрес → набор (nftables).** В таблице `inet fw4` существуют три набора:
 
-| set | contents | filled by |
+| набор | содержимое | чем наполняется |
 |---|---|---|
-| `ru-blocked` | dynamic | DNS resolver, for domains from the intercept lists |
-| `ru-static` | static | updater script, address lists for services without DNS |
-| `naive-direct` | dynamic | DNS resolver, for domains from the bypass list |
+| `ru-blocked` | динамический | DNS-сервер, по доменам из списков перехвата |
+| `ru-static` | статический | скрипт обновления адресов, списки для сервисов без DNS |
+| `naive-direct` | динамический | DNS-сервер, по доменам из списка обхода |
 
-**3. Set → action (nat/prerouting).** Rules in this order:
+**3. Набор → действие (nat/prerouting).** Правила в следующем порядке:
 
-1. `ip daddr <vps_ip> counter return` — anti-loop: traffic to the server itself must not
-   be redirected into the tunnel.
-2. `ip daddr @naive-direct counter return` — **bypass, placed before the intercept**.
-   A domain can be present in both the intercept list and the bypass list (this is the
-   normal case for a large upstream list). Rule order decides, therefore upstream list
-   updates cannot break the bypass.
+1. `ip daddr <vps_ip> counter return` — антипетля: трафик к самому серверу не должен
+   заворачиваться в туннель.
+2. `ip daddr @naive-direct counter return` — **обход, размещён перед перехватом**.
+   Домен может присутствовать одновременно в списке перехвата и в списке обхода (для
+   большого внешнего списка это нормальная ситуация). Решает порядок правил, поэтому
+   обновления внешнего списка не могут нарушить обход.
 3. `ip daddr @ru-blocked` / `@ru-static` `tcp dport { 80, 443 }` → `redirect to :<redir_port>`.
 
-A separate `quic_block` chain handles QUIC. naiveproxy carries TCP only, so UDP/443
-towards an intercepted address cannot be proxied. The default policy `reject` answers
-such a datagram with ICMP port-unreachable: the client switches to TCP, which is
-intercepted, within milliseconds. Two details make this the correct default rather than
-an unnecessary cut. First, the destination is in the intercept list because it is
-unreachable directly, so letting QUIC out means the handshake dies at the provider and
-the client waits for its own timeout before falling back. Second, a QUIC Initial packet
-carries the ClientHello behind a publicly derivable key, so the hostname is readable to
-the provider in plaintext; through the tunnel the only visible name is the server's.
+Отдельная цепочка `quic_block` обрабатывает QUIC. naiveproxy передаёт только TCP,
+поэтому UDP/443 к перехватываемому адресу проксировать нечем. Политика по умолчанию
+`reject` отвечает на такую датаграмму ICMP port-unreachable: клиент за миллисекунды
+переходит на TCP, который перехватывается. Политика правильна по умолчанию, а не
+избыточна. Во-первых, адрес находится в списке перехвата потому, что напрямую недоступен:
+если выпустить QUIC, рукопожатие оборвётся у провайдера, и клиент будет ждать
+собственного таймаута, прежде чем перейти на TCP. Во-вторых, пакет QUIC Initial несёт
+ClientHello за общедоступным ключом, поэтому имя узла читается провайдером открытым
+текстом; через туннель видно только имя сервера.
 
-`quic_policy direct` leaves UDP/443 untouched. It is appropriate when an address is in
-the intercept list but is in fact reachable directly and profits from HTTP/3; in that
-case the hostname is exposed to the provider, which for an unblocked destination is not
-a concern. Set it with `naive-ctl set-quic direct` or from the LuCI page.
+`quic_policy direct` не трогает UDP/443. Это оправдано, когда адрес попал в список
+перехвата, но фактически доступен напрямую и выигрывает от HTTP/3; в этом случае имя узла
+становится видно провайдеру, что для незаблокированного адреса не имеет значения.
+Установка: `naive-ctl set-quic direct` либо вкладка «Настройки» в LuCI.
 
-The rule matches `udp dport 443` only. Other UDP traffic (games, WireGuard, VoIP,
-DNS) is not touched, and QUIC towards addresses in the bypass list already goes out
-directly because the bypass rule precedes the reject.
+Правило соответствует только `udp dport 443`. Остальной UDP-трафик (игры, WireGuard,
+VoIP, DNS) не затрагивается, а QUIC к адресам из списка обхода идёт напрямую, поскольку
+правило обхода стоит перед отклонением.
 
-### Fail-safe
+### Отказоустойчивость
 
-A watchdog runs from cron every minute. It probes the **real exit address** through the
-SOCKS listener (`https://1.1.1.1/cdn-cgi/trace`) rather than checking whether the process
-exists — naive binds its ports before it is able to proxy. Exit address equal to the
-server address means the tunnel is alive: rules are installed. Anything else means the
-intercept is removed and traffic goes direct.
+Скрипт контроля состояния (`health.sh`) запускается как процесс procd с интервалом
+`watchdog_interval` секунд, по умолчанию раз в минуту. Он проверяет **фактический выходной
+адрес** через SOCKS-порт (`https://1.1.1.1/cdn-cgi/trace`), а не наличие процесса: naive
+открывает порты раньше, чем способен проксировать. Совпадение выходного адреса с адресом
+сервера означает, что туннель работает, и правила устанавливаются. В противном случае
+перехват снимается, трафик идёт напрямую.
 
-A failed DNS lookup of the server name is not treated as evidence of a dead tunnel: the
-last known address is reused instead.
-
----
-
-## Requirements
-
-* OpenWrt 23.05 or newer with `fw4` (nftables). Tested on 25.12.
-* LuCI 24.10 or newer. The page uses the JavaScript view model introduced in 23.05 and
-  is exercised on 24.10 and 25.12.
-* `naiveproxy` client (`/usr/bin/naive`). It is **not part of the official feed**, so it
-  must come from a third-party feed such as `openwrt-passwall-packages` or from a
-  self-built package. The package declares a conditional dependency
-  (`+PACKAGE_naiveproxy:naiveproxy`), which applies only when the client package exists
-  in the build tree; a hard dependency would make this package unbuildable.
-* A DNS backend, one of:
-  * `smartdns` — domain sets plus `nftset`, and per-domain AAAA suppression;
-  * `dnsmasq-full` — `nftset=` support. The base `dnsmasq` package may be built without
-    it; the application reports this condition explicitly instead of failing silently.
-* `nftables`, `kmod-nft-nat`, `curl`, `jsonfilter` (all present on a default image except
-  where noted).
-
-Footprint: the client binary is about 12.6 MB, the routing application (LuCI page, ACL,
-`naive-ctl`, watchdog, both updaters) is about 56 KB, the domain and address lists are
-about 2.5 MB.
+Неудачный резолв имени сервера не считается признаком неработающего туннеля: используется
+последний известный адрес.
 
 ---
 
-## Installation
+## Требования
 
-### Prebuilt packages
+* OpenWrt 23.05 или новее с `fw4` (nftables). Проверено на 25.12.
+* LuCI 24.10 или новее. Страница использует модель представлений на JavaScript,
+  появившуюся в 23.05; проверена на 24.10 и 25.12.
+* Клиент `naiveproxy` (`/usr/bin/naive`). Он **отсутствует в официальном фиде** и
+  устанавливается из релиза upstream, см. раздел «Клиент naiveproxy». В пакете объявлена
+  условная зависимость (`+PACKAGE_naiveproxy:naiveproxy`), которая применяется только при
+  наличии клиента в дереве сборки; жёсткая зависимость сделала бы пакет несобираемым.
+* DNS-бэкенд, один из:
+  * `smartdns` — доменные наборы плюс `nftset`, а также подавление AAAA по домену;
+  * `dnsmasq-full` — поддержка `nftset=`. Базовый пакет `dnsmasq` может быть собран без
+    неё; приложение сообщает об этом явно, а не отказывает молча.
+* `nftables` с поддержкой NAT (входит в состав `firewall4`), `curl`, `jsonfilter`.
 
-Every version tag triggers a GitHub Actions build with the official OpenWrt SDK
-containers, and the artifacts are attached to the release:
+Занятое место: исполняемый файл клиента около 12.6 МБ, приложение (страница LuCI, ACL,
+`naive-ctl`, скрипт контроля состояния, два скрипта обновления списков) около 56 КБ,
+списки доменов и адресов около 2.5 МБ.
+
+---
+
+## Установка
+
+### Готовые пакеты
+
+Каждый тег версии запускает сборку в GitHub Actions с официальными контейнерами OpenWrt
+SDK, результаты прикрепляются к релизу:
 
 * `luci-app-naive-routing-*.apk` — OpenWrt 25.x (apk-tools);
-* `luci-app-naive-routing_*.ipk` — OpenWrt 24.10 and earlier (opkg).
+* `luci-app-naive-routing_*.ipk` — OpenWrt 24.10 и ранее (opkg);
+* `luci-i18n-naive-routing-ru-*` — русский перевод интерфейса, устанавливается отдельно.
 
-The package contains only shell scripts and JavaScript and is built with
-`PKGARCH:=all`, so one file per release line fits every target architecture of that
-line.
-
-```
-# OpenWrt 24.10 and earlier
-opkg update && opkg install ./luci-app-naive-routing_1.0.4-r1_all.ipk
-
-# OpenWrt 25.x: the artifacts are not signed by a key present in the router, hence
-# --allow-untrusted
-apk add --allow-untrusted ./luci-app-naive-routing-1.0.4-r1.apk
-```
-
-The `naiveproxy` client is not included and is not pulled in automatically, see
-Requirements. The build workflow lives in `.github/workflows/build.yml`.
-
-### As a package
-
-The repository is laid out as an OpenWrt feed: `luci-app-naive-routing/` holds the
-package (Makefile, `root/`, `po/`), the repository root holds the license, the
-documentation and the CI workflow. This layout is required — a `Makefile` in the feed
-root makes the feed index generation fail.
+Пакет состоит только из shell-скриптов и JavaScript и собирается с `PKGARCH:=all`,
+поэтому один файл на линию релиза подходит для всех архитектур этой линии.
 
 ```
-# as a local feed inside an OpenWrt buildroot or SDK tree
-echo "src-link naive /path/to/this/repository" >> feeds.conf
+# OpenWrt 24.10 и ранее
+opkg update && opkg install ./luci-app-naive-routing_1.1.0-r1_all.ipk
+
+# OpenWrt 25.x: артефакты не подписаны ключом, присутствующим на роутере,
+# поэтому нужен --allow-untrusted
+apk add --allow-untrusted ./luci-app-naive-routing-1.1.0-r1.apk
+```
+
+Клиент `naiveproxy` в пакет не входит и автоматически не устанавливается, см. раздел
+«Клиент naiveproxy». Сценарий сборки находится в `.github/workflows/build.yml`.
+
+### Пакетом
+
+Репозиторий разложен как фид OpenWrt: в каталоге `luci-app-naive-routing/` находится
+пакет (Makefile, `root/`, `po/`), в корне — лицензия, документация и сценарий CI. Такая
+раскладка обязательна: `Makefile` в корне фида ломает генерацию индекса.
+
+```
+# как локальный фид внутри дерева OpenWrt buildroot или SDK
+echo "src-link naive /путь/к/этому/репозиторию" >> feeds.conf
 ./scripts/feeds update naive && ./scripts/feeds install -p naive luci-app-naive-routing
 make menuconfig      # LuCI -> Applications -> luci-app-naive-routing
 make package/luci-app-naive-routing/compile V=s
 
-# or straight into the package tree
-git clone <this repository> package/naive-routing
+# либо сразу в дерево пакетов
+git clone <этот репозиторий> package/naive-routing
 make package/naive-routing/luci-app-naive-routing/compile V=s
 ```
 
-The SDK produces both `ipk` (opkg) and `apk` (OpenWrt 25.x) artifacts. The LuCI build
-machinery compiles `luci-app-naive-routing/po/ru/naive_routing.po` into the translation
-catalog automatically.
+SDK формирует оба артефакта: `ipk` (opkg) и `apk` (OpenWrt 25.x). Сборочная система LuCI
+сама компилирует `luci-app-naive-routing/po/ru/naive_routing.po` в каталог переводов.
 
-Two details of the OpenWrt build system are not obvious and both are mandatory:
+Две особенности сборочной системы OpenWrt неочевидны, но обязательны:
 
-* The package must sit in a subdirectory of the feed, not in its root. `include/scan.mk`
-  treats every `Makefile` under the feed as a package description, so a stray root
-  `Makefile` breaks index generation with `target pattern contains no '%'`.
-* The package `Makefile` must end with the signature comment
-  `# call BuildPackage - OpenWrt buildroot signature`. The scanner locates packages by
-  grepping for a `BuildPackage` call, and `luci.mk` hides the real one; without the
-  comment the package silently never reaches the build metadata and
-  `make package/luci-app-naive-routing/compile` reports `No rule to make target`.
+* Пакет должен находиться в подкаталоге фида, а не в его корне. `include/scan.mk`
+  считает описанием пакета любой `Makefile` под каталогом фида, поэтому посторонний
+  `Makefile` в корне ломает генерацию индекса с ошибкой
+  `target pattern contains no '%'`.
+* `Makefile` пакета должен заканчиваться служебным комментарием
+  `# call BuildPackage - OpenWrt buildroot signature`. Сканер находит пакеты поиском
+  вызова `BuildPackage`, а `luci.mk` скрывает настоящий вызов; без комментария пакет
+  молча не попадает в метаданные сборки, а `make package/luci-app-naive-routing/compile`
+  отвечает `No rule to make target`.
 
-### Manually, without building
+### Вручную, без сборки
 
 ```
 scp -r . root@router:/tmp/luci-app-naive-routing
 ssh root@router 'cd /tmp/luci-app-naive-routing && ./install.sh'
 ```
 
-`./install.sh` copies files, registers the cron entries and reloads the affected
-services. `./install.sh uninstall` removes the application files while keeping
-`/etc/config/naive_routing` and `/etc/naive-routing`.
+`./install.sh` копирует файлы, регистрирует службу и перезапускает затронутые компоненты.
+Задания cron не создаются: контроль состояния и обновление списков выполняются
+процессами procd. `./install.sh uninstall` удаляет файлы приложения, сохраняя
+`/etc/config/naive_routing` и `/etc/naive-routing`.
 
-### The naiveproxy client
+### Клиент naiveproxy
 
-The package does not ship the client binary and does not pull it from a feed: `naiveproxy`
-is absent from the official OpenWrt feeds. Install it from the upstream release that
-matches the target architecture:
+Пакет не содержит исполняемый файл клиента и не подтягивает его из фида: `naiveproxy`
+отсутствует в официальных фидах OpenWrt. Устанавливается из релиза upstream,
+соответствующего архитектуре цели:
 
 ```
 arch=$( . /etc/openwrt_release; echo $DISTRIB_ARCH )
@@ -180,24 +182,32 @@ tar -xJf /tmp/naive.tar.xz -C /tmp
 install -m 755 /tmp/naiveproxy-$ver-openwrt-$arch-static/naive /usr/bin/naive
 ```
 
-Two points that are easy to get wrong:
+Два момента, на которых легко ошибиться:
 
-* Take the `openwrt-<arch>-static` asset. The `linux-*` assets are dynamically linked
-  against glibc and fail on OpenWrt with `not found`, because OpenWrt uses musl.
-* `naive --version` prints only the Chromium version (`154.0.8037.49`); the release
-  suffix (`-5`, `-4`) is not visible at runtime. Verify the patch level through the
-  checksum of the downloaded archive, not through `--version`.
+* Нужен артефакт `openwrt-<arch>-static`. Артефакты `linux-*` собраны динамически
+  против glibc и в OpenWrt не запускаются — оболочка отвечает `not found`, так как
+  в системе используется musl. Пригодность проверяется до установки:
+  `strings -a naive | grep -c GLIBC_2` должно быть равно нулю.
+* `naive --version` печатает только версию Chromium (`154.0.8037.49`); суффикс релиза
+  (`-5`, `-4`) в рантайме не виден. Уровень патча проверяется по контрольной сумме
+  скачанного архива, а не по выводу команды.
 
-## Scheduling
+Замена исполняемого файла без простоя: сохранить копию текущего, остановить службу,
+переместить новый файл на место (не копировать поверх работающего — иначе `Text file
+busy`), запустить службу, проверить `naive-ctl status` и `naive-ctl check <домен>`.
 
-The watchdog and the list updaters are started by the init script as supervised procd
-instances, so no cron entries are created and a clean install needs no manual setup:
+## Расписание
 
-* `watchdog` runs `health.sh` every `watchdog_interval` seconds (default 60);
-* `lists` runs `update-ips.sh` and `update-domains.sh` once a day at `update_hour`:`update_min`
-  (default 03:30 local time).
+Скрипт контроля состояния и скрипты обновления списков запускаются init-скриптом как
+процессы под управлением procd, поэтому записи в cron не создаются и чистая установка не
+требует ручной настройки:
 
-Both are controlled from `/etc/config/naive_routing`:
+* процесс `watchdog` вызывает `health.sh` каждые `watchdog_interval` секунд
+  (по умолчанию 60);
+* процесс `lists` вызывает `update-ips.sh` и `update-domains.sh` раз в сутки в
+  `update_hour`:`update_min` (по умолчанию 03:30 по локальному времени).
+
+Оба управляются из `/etc/config/naive_routing`:
 
 ```
 uci set naive_routing.settings.watchdog='1'
@@ -208,10 +218,10 @@ uci set naive_routing.settings.update_min='30'
 uci commit naive_routing && /etc/init.d/naive-routing restart
 ```
 
-## Migration from a manual installation
+## Переход с ручной установки
 
-If the files were placed by hand, remove them before installing the package, otherwise
-they stay untracked and later updates leave stale copies behind:
+Если файлы раскладывались вручную, их нужно удалить до установки пакета, иначе они
+остаются неотслеживаемыми и при обновлении сохраняются устаревшие копии:
 
 ```
 cp /etc/config/naive_routing /root/naive_routing.backup
@@ -219,17 +229,17 @@ rm -rf /usr/libexec/naive-routing /www/luci-static/resources/view/naive_routing
 rm -f /usr/bin/naive-ctl /etc/nftables.d/10-naive-sets.nft
 rm -f /usr/share/luci/menu.d/luci-app-naive-routing.json \
       /usr/share/rpcd/acl.d/luci-app-naive-routing.json
-sed -i '/naive-routing\|naive-ctl/d' /etc/crontabs/root    # cron entries of the manual setup
-/etc/init.d/naive stop; /etc/init.d/naive disable 2>/dev/null   # hand-written init script
-apk add --allow-untrusted ./luci-app-naive-routing-1.0.4-r1.apk
+sed -i '/naive-routing\|naive-ctl/d' /etc/crontabs/root   # записи cron прежней установки
+/etc/init.d/naive stop; /etc/init.d/naive disable 2>/dev/null  # init-скрипт прежней установки
+apk add --allow-untrusted ./luci-app-naive-routing-1.1.0-r1.apk
 cp /root/naive_routing.backup /etc/config/naive_routing
 /etc/init.d/naive-routing enable && /etc/init.d/naive-routing start
 ```
 
-`/etc/config/naive_routing` is deliberately preserved: it holds the tunnel address,
-ports and policies, and the package default replaces them with empty values.
+`/etc/config/naive_routing` сохраняется намеренно: в нём адрес туннеля, порты и
+политики, а конфигурация пакета по умолчанию содержит пустые значения.
 
-## Configuration
+## Настройка
 
 ```
 uci set naive_routing.settings.proxy_url='https://user:password@vps.example.com'
@@ -240,173 +250,206 @@ uci commit naive_routing
 /usr/libexec/naive-routing/health.sh
 ```
 
-The client configuration (`/var/etc/naive/config.json`) is generated from UCI on every
-start, so `/etc/config/naive_routing` is the single source of truth.
+Конфигурация клиента (`/var/etc/naive/config.json`) генерируется из UCI при каждом
+запуске, поэтому `/etc/config/naive_routing` является единственным источником истины.
 
-### Options
+### Параметры
 
-| option | default | meaning |
+| параметр | по умолчанию | назначение |
 |---|---|---|
-| `enabled` | `1` | intended state, informational |
-| `proxy_url` | — | upstream URL including credentials |
-| `vps_domain` | `vps.example.com` | server name, resolved for the anti-loop rule |
-| `vps_ip` | — | pin the server address, skips resolution |
-| `redir_port` | `11090` | redirect target for intercepted TCP |
-| `socks_port` | `11081` | SOCKS listener used for probes |
-| `concurrency` | `3` | parallel TLS connections (`insecure-concurrency`) |
+| `enabled` | `1` | желаемое состояние, информационно |
+| `proxy_url` | — | адрес вышестоящего сервера вместе с учётными данными |
+| `vps_domain` | `vps.example.com` | имя сервера, разрешается для правила-антипетли |
+| `vps_ip` | — | фиксированный адрес сервера, резолв не выполняется |
+| `redir_port` | `11090` | цель перенаправления перехватываемого TCP |
+| `socks_port` | `11081` | SOCKS-порт для проверок |
+| `concurrency` | `3` | число параллельных TLS-соединений (`insecure-concurrency`) |
 | `dns_backend` | `auto` | `auto`, `smartdns`, `dnsmasq`, `none` |
-| `quic_policy` | `reject` | `reject` (answer UDP/443 with ICMP unreachable) or `direct` |
-| `big_list` | `/etc/naive-routing/blocked_domains.txt` | large domain list |
-| `direct_list` | `/etc/naive-routing/direct_domains.txt` | bypass list |
-| `proxy_list` | `/etc/naive-routing/proxy_domains.txt` | own additions to the intercept |
-| `static_ips` | `/etc/naive-routing/blocked_ips.nft` | static address list |
-| `static_ranges` | `/etc/naive-routing/ranges_ipv4.nft` | static ranges (services without DNS) |
-| `chain_nat`, `chain_quic` | `nat_naive`, `quic_block` | nft chain names |
-| `set_blocked`, `set_static`, `set_direct` | `ru-blocked`, `ru-static`, `naive-direct` | nft set names |
-| `domains_min_entries` | `20000` | updater guard, see below |
-| `ips_min_entries` | `1000` | updater guard, see below |
+| `quic_policy` | `reject` | `reject` (отвечать на UDP/443 ICMP-отказом) либо `direct` |
+| `big_list` | `/etc/naive-routing/blocked_domains.txt` | большой список доменов |
+| `direct_list` | `/etc/naive-routing/direct_domains.txt` | список обхода |
+| `proxy_list` | `/etc/naive-routing/proxy_domains.txt` | дополнительные домены для перехвата |
+| `static_ips` | `/etc/naive-routing/blocked_ips.nft` | статический список адресов |
+| `static_ranges` | `/etc/naive-routing/ranges_ipv4.nft` | статические диапазоны |
+| `chain_nat`, `chain_quic` | `nat_naive`, `quic_block` | имена цепочек nft |
+| `set_blocked`, `set_static`, `set_direct` | `ru-blocked`, `ru-static`, `naive-direct` | имена наборов nft |
+| `watchdog` | `1` | запускать процесс контроля состояния |
+| `watchdog_interval` | `60` | период контроля состояния, секунды |
+| `update_lists` | `1` | запускать процесс обновления списков |
+| `update_hour`, `update_min` | `3`, `30` | время суточного обновления списков |
+| `domains_min_entries` | `20000` | минимальный размер списка доменов при обновлении |
+| `ips_min_entries` | `1000` | минимальный размер списка адресов при обновлении |
 
-Both UCI layouts are accepted: `naive_routing.settings.<option>` (as shipped) and
-`naive_routing.<option>` (hand-written configs).
+Поддерживаются обе схемы UCI: `naive_routing.settings.<параметр>` (как в поставляемом
+конфиге) и `naive_routing.<параметр>` (часто используется в конфигах, написанных вручную).
 
-An existing manual installation can be reused: point `naive_config`, `init_script`,
-`health_script`, `big_list`, `direct_list`, `proxy_list`, `static_ips` and
-`static_ranges` at the current paths and leave `proxy_url` empty.
-
----
-
-## Domain lists
-
-Domains are entered one per line. Subdomains are inherited. Lines starting with `#`
-and empty lines are ignored, and comments survive saving from the LuCI page. Input is
-normalised on apply: scheme, path and port are stripped, upper case is lowered, invalid
-entries are dropped, duplicates are collapsed.
-
-* `direct_list` — bypass. Wins over the intercept list because of rule order.
-* `proxy_list` — own additions to the intercept, on top of the large list.
-
-Decision lookup: the LuCI page section *Where will a domain go*, or
-`naive-ctl check example.com`. The answer is derived from the lists, and the resolved
-addresses are shown for reference.
-
-**The domain path requires that LAN clients use the router as their DNS server.** If a
-client is configured for DoH/DoT to an external resolver (browser "secure DNS", Android
-Private DNS), the resolver never sees the domain and the corresponding addresses do not
-reach the sets. Such traffic falls back to the static address list or goes direct.
+Уже существующую ручную установку можно переиспользовать: укажите в `naive_config`,
+`init_script`, `health_script`, `big_list`, `direct_list`, `proxy_list`, `static_ips` и
+`static_ranges` текущие пути, а `proxy_url` оставьте пустым.
 
 ---
 
-## DNS backends
+## Интерфейс LuCI
 
-`auto` selects `smartdns` when its configuration file exists and the process is running,
-otherwise `dnsmasq`.
+Страница открывается в LuCI: Сеть → Маршрутизация naiveproxy. Три вкладки:
 
-**smartdns.** The application writes `/etc/smartdns/custom.conf` (path configurable)
-containing `domain-set` declarations, `nftset` bindings, `nftset-timeout 3600` and
-`domain-rules … -address #6` to suppress AAAA for intercepted domains.
+* **Основное** — переключатель перехвата (зелёный при выключенном перехвате, красный при
+  включённом), метка состояния и таблица параметров: туннель, выходной адрес, адрес
+  сервера, DNS-бэкенд, число правил, размеры наборов, счётчики трафика, размеры списков.
+  Пояснение к каждой строке доступно по значку `i`.
+* **Настройки** — число соединений с сервером, DNS-бэкенд с проверкой поддержки `nftset`,
+  политика QUIC. Каждый параметр снабжён подсказкой с обоснованием.
+* **Маршруты** — проверка решения по домену и два редактора списков: обход и
+  дополнительные домены для перехвата. Сохранение списка применяет правила без
+  перезапуска клиента.
 
-**dnsmasq.** The application writes `<dnsmasq_dir>/naive-routing.conf` with `nftset=`
-directives in the documented form `nftset=/<domains>/4#inet#fw4#<set>`, split into
-chunks to keep every line short. dnsmasq merges several directives that target the same
-set. The `confdir` option of dnsmasq is pointed at a persistent directory, because the
-OpenWrt default is `/tmp/dnsmasq.d` and would not survive a reboot. Per-domain AAAA
-suppression is not available in dnsmasq; on networks without IPv6 this has no practical
-effect.
-
-Switch: `naive-ctl set-dns <auto|smartdns|dnsmasq|none>`, or the selector on the LuCI
-page. `naive-ctl dns-check` reports the active backend and whether its build provides
-`nftset`.
+Страница опрашивает состояние каждые 5 секунд и обновляет таблицу без перезагрузки.
 
 ---
 
-## Speed versus stealth
+## Доменные списки
 
-`concurrency` maps to `--insecure-concurrency` of naive. A single connection is limited
-to roughly 11-13 MB/s by the HTTP/2 flow-control window; the limit does not depend on
-the link. Parallel TLS connections remove that ceiling for parallel workloads (browsers,
-package managers, layer pulls), not for a single stream.
+Домены вводятся по одному в строке. Поддомены наследуются. Строки, начинающиеся с `#`, и
+пустые строки игнорируются, комментарии сохраняются при сохранении из страницы LuCI. При
+применении ввод нормализуется: схема, путь и порт отбрасываются, регистр приводится к
+нижнему, некорректные записи удаляются, дубликаты схлопываются.
 
-Measured on a 250 Mbit/s uplink with 36 ms RTT to the server (OpenWrt on a Xiaomi
-AX3000T, single core pair):
+* `direct_list` — обход. Побеждает список перехвата за счёт порядка правил.
+* `proxy_list` — дополнительные домены для перехвата, поверх большого списка.
 
-| configuration | three parallel streams |
+Проверка решения: вкладка «Маршруты» страницы LuCI либо
+`naive-ctl check example.com`. Ответ строится по спискам, разрешённые адреса приводятся
+справочно.
+
+**Доменный путь требует, чтобы клиенты локальной сети использовали роутер как DNS-сервер.**
+Если на клиенте настроен DoH/DoT к внешнему резолверу («безопасный DNS» в браузере,
+Private DNS в Android), резолвер не увидит домен, и соответствующие адреса не попадут в
+наборы. Такой трафик обслуживается статическим списком адресов либо идёт напрямую.
+
+---
+
+## DNS-бэкенды
+
+`auto` выбирает `smartdns`, если его файл конфигурации существует и процесс запущен,
+иначе `dnsmasq`.
+
+**smartdns.** Приложение записывает `/etc/smartdns/custom.conf` (путь настраивается) с
+объявлениями `domain-set`, привязками `nftset`, `nftset-timeout 3600` и
+`domain-rules … -address #6` для подавления AAAA у перехватываемых доменов.
+
+**dnsmasq.** Приложение записывает `<dnsmasq_dir>/naive-routing.conf` с директивами
+`nftset=` в документированном виде `nftset=/<домены>/4#inet#fw4#<набор>`, разбитыми на
+фрагменты, чтобы каждая строка оставалась короткой. Несколько директив на один набор
+dnsmasq объединяет сам. Параметр `confdir` dnsmasq переводится на постоянный каталог,
+поскольку значение по умолчанию в OpenWrt (`/tmp/dnsmasq.d`) не переживает перезагрузку.
+Подавление AAAA по отдельному домену в dnsmasq недоступно; в сети без IPv6 это не имеет
+практического значения.
+
+Переключение: `naive-ctl set-dns <auto|smartdns|dnsmasq|none>` либо селектор на вкладке
+«Настройки». `naive-ctl dns-check` показывает активный бэкенд и наличие поддержки
+`nftset` в сборке.
+
+---
+
+## Скорость и скрытность
+
+Параметр `concurrency` соответствует `--insecure-concurrency` в naive. Одно соединение
+ограничено примерно 11-13 МБ/с окном управления потоком HTTP/2; ограничение не зависит от
+канала. Параллельные TLS-соединения снимают этот потолок для параллельной нагрузки
+(браузер, менеджеры пакетов, загрузка слоёв), но не для одного потока.
+
+Замеры на канале 250 Мбит/с при RTT до сервера 36 мс (OpenWrt на Xiaomi AX3000T):
+
+| конфигурация | три параллельных потока |
 |---|---|
-| `concurrency = 1` | 11.3 MB/s |
-| `concurrency = 3` | 20.8 MB/s |
-| three separate client processes | 20-24 MB/s |
+| `concurrency = 1` | 11.3 МБ/с |
+| `concurrency = 3` | 20.8 МБ/с |
+| три отдельных процесса клиента | 20-24 МБ/с |
 
-The price is analytical: more simultaneous TLS connections to one domain are less
-consistent with browser behaviour. The naive author states this explicitly in `USAGE.txt`
-("More connections make the tunneling easier to detect and less secure") and recommends
-no more than four. Use `1` when stealth matters more than throughput.
-
----
-
-## Updaters
-
-Two cron jobs, both installed by `install.sh`:
-
-* `30 3 * * *` `update-ips.sh` — static address list
-  (`Re-filter-lists/ipsum.lst` by default) converted to nft elements and applied to
-  `ru-static`.
-* `40 3 * * *` `update-domains.sh` — large domain list
-  (`Re-filter-lists/domains_all.lst` by default).
-
-Both download directly first and through the tunnel as a fallback, normalise the
-content, refuse to replace an existing list when the result is smaller than the
-configured threshold, and skip the reload when nothing changed. `update-domains.sh`
-verifies that the resolver still answers and restores the previous list otherwise. Logs
-go to `logread` with tags `naive-ips` and `naive-domains`.
+Цена — аналитическая: несколько одновременных TLS-соединений к одному домену менее
+согласуются с поведением браузера. Автор naive указывает это прямо в `USAGE.txt`
+(«More connections make the tunneling easier to detect and less secure») и рекомендует не
+более четырёх. Значение `1` применяется, когда скрытность важнее пропускной способности.
 
 ---
 
-## Diagnostics
+## Обновление списков
+
+Две задачи, обе выполняются процессом `lists` init-скрипта:
+
+* `update-ips.sh` — статический список адресов (`Re-filter-lists/ipsum.lst` по умолчанию),
+  преобразуется в элементы nft и применяется к набору `ru-static`;
+* `update-domains.sh` — большой список доменов (`Re-filter-lists/domains_all.lst`
+  по умолчанию).
+
+Порядок работы: обе задачи сначала пытаются скачать напрямую и повторяют попытку через
+туннель, нормализуют содержимое, отказываются заменять существующий список, если
+результат меньше заданного порога, и не перезапускают службы, если ничего не изменилось.
+`update-domains.sh` дополнительно проверяет, что резолвер отвечает, и в противном случае
+возвращает предыдущий список. События пишутся в `logread` с тегами `naive-ips` и
+`naive-domains`.
+
+---
+
+## Диагностика
 
 ```
-naive-ctl status                 # key=value, the same data the LuCI page renders
-naive-ctl dns-check              # active backend and nftset support
-naive-ctl check example.com      # list-level decision and resolved addresses
-logread | grep naive-           # watchdog, DNS backend and updater events
+naive-ctl status                 # key=value, те же данные, что показывает страница LuCI
+naive-ctl dns-check              # активный бэкенд и поддержка nftset
+naive-ctl check example.com      # решение по спискам и разрешённые адреса
+logread | grep naive-            # события контроля состояния, DNS и обновления списков
 nft list chain inet fw4 nat_naive
 nft list set inet fw4 ru-blocked
 ```
 
-Frequent causes of "a listed domain still goes direct":
+Частые причины ситуации «домен есть в списке, а идёт напрямую»:
 
-* the client resolves through its own DoH/DoT, so the domain never reaches the resolver;
-* the domain is in `direct_list`, which wins by rule order;
-* the resolver has no `nftset` support (base `dnsmasq` instead of `dnsmasq-full`);
-* the resolver was restarted before the nft sets existed, so it never registered its
-  bindings — `naive-ctl apply` runs the watchdog first and then the resolver reload,
-  which is the required order.
+* клиент разрешает имена через свой DoH/DoT, и домен не доходит до резолвера;
+* домен присутствует в `direct_list`, который побеждает по порядку правил;
+* в сборке резолвера нет `nftset` (базовый `dnsmasq` вместо `dnsmasq-full`);
+* резолвер был перезапущен до создания nft-наборов и не зарегистрировал привязки —
+  `naive-ctl apply` сначала запускает скрипт контроля состояния и только затем
+  перезапускает резолвер, это требуемый порядок.
 
-`state=down` with a live tunnel usually means the exit address could not be verified
-(probe blocked, `curl` missing) or the server address could not be resolved and no
-previous address was known.
+`state=down` при работающем туннеле обычно означает, что выходной адрес не удалось
+проверить (проба заблокирована, отсутствует `curl`) либо имя сервера не разрешилось и
+предыдущий адрес неизвестен.
 
----
+Если служба не поднялась после установки, проверить регистрацию процессов:
 
-## Limitations
+```
+ubus call service list | jsonfilter -e '@["naive-routing"].instances'
+ls -l /usr/bin/naive-ctl /usr/libexec/naive-routing/*.sh
+```
 
-* TCP only. naiveproxy does not carry UDP, therefore games, QUIC-based streaming and part
-  of voice traffic cannot be proxied; the QUIC reject rule exists to force the TCP
-  fallback.
-* A single stream remains limited by the HTTP/2 window regardless of `concurrency`.
-* Domain routing depends on the router being the DNS server for the LAN.
-* The application does not implement the proxy protocol itself. It supervises the
-  official naive client, whose TLS fingerprint is the reason naive survives DPI. Do not
-  replace it with a reimplementation.
+Неисполняемый файл в команде процесса приводит к тому, что procd не регистрирует службу
+целиком, без сообщения в журнале.
 
 ---
 
-## Credits
+## Ограничения
 
-* [klzgrad/naiveproxy](https://github.com/klzgrad/naiveproxy) — client and the Caddy
-  `forwardproxy` fork used on the server side.
-* [1andrevich/Re-filter-lists](https://github.com/1andrevich/Re-filter-lists) — domain and
-  address lists used by the default updater configuration.
-* OpenWrt `fw4` and `dnsmasq` documentation for the nftables set and `nftset` interfaces.
+* Только TCP. naiveproxy не передаёт UDP, поэтому игры, потоковое видео по QUIC и часть
+  голосового трафика через него не пройдут; правило отклонения QUIC существует, чтобы
+  заставить клиента перейти на TCP.
+* Один поток остаётся ограниченным окном HTTP/2 независимо от `concurrency`.
+* Маршрутизация по доменам зависит от того, что роутер является DNS-сервером локальной
+  сети.
+* Приложение не реализует сам протокол прокси. Оно управляет официальным клиентом naive,
+  TLS-отпечаток которого и обеспечивает устойчивость к DPI. Замена клиента собственной
+  реализацией не предусматривается.
 
-## License
+---
 
-MIT, see [LICENSE](LICENSE).
+## Благодарности
+
+* [klzgrad/naiveproxy](https://github.com/klzgrad/naiveproxy) — клиент и форк
+  `forwardproxy` для Caddy, используемый на стороне сервера.
+* [1andrevich/Re-filter-lists](https://github.com/1andrevich/Re-filter-lists) — списки
+  доменов и адресов, используемые конфигурацией обновления по умолчанию.
+* Документация OpenWrt по `fw4` и `dnsmasq` за описание интерфейсов наборов nftables и
+  `nftset`.
+
+## Лицензия
+
+MIT, см. [LICENSE](LICENSE).

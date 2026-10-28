@@ -6,6 +6,11 @@
 
 /* luci-app-naive-routing — naiveproxy intercept state and routing lists.
  *
+ * Layout: three tabs. "Overview" carries the state and a prominent switch,
+ * "Settings" carries the editable parameters, "Routes" carries the domain
+ * tools. Long explanations live in tooltips (the title attribute) instead of
+ * paragraphs, so the page stays readable.
+ *
  * All user-visible strings are English and wrapped into _() so that the
  * standard LuCI translation catalogs (po/ru) apply. A small built-in Russian
  * dictionary is used as a fallback when no compiled catalog is installed and
@@ -18,26 +23,33 @@
 
 var RU = {
 	'Naiveproxy Routing': 'Маршрутизация naiveproxy',
+	'Overview': 'Основное',
+	'Settings': 'Настройки',
+	'Routes': 'Маршруты',
+	'Status': 'Состояние',
 	'Routing state': 'Состояние маршрутизации',
 	'State': 'Состояние',
 	'Tunnel': 'Туннель',
 	'Exit IP (through tunnel)': 'Выходной IP (через туннель)',
 	'Server address': 'Адрес сервера',
-	'Rules': 'Правила',
+	'Rules': 'Правила перехвата',
 	'Address sets': 'Наборы адресов',
 	'Through the tunnel': 'Прошло через туннель',
-	'Lists': 'Списки',
+	'Lists': 'Списки доменов',
 	'DNS backend': 'DNS-бэкенд',
 	'intercept enabled': 'перехват включён',
 	'disabled manually': 'выключен вручную',
 	'tunnel unavailable — traffic goes direct': 'туннель недоступен — трафик напрямую',
 	'unknown': 'неизвестно',
 	'not running': 'не запущен',
-	'rules': 'правила перехвата',
+	'rules': 'правил',
 	'processes': 'процессов',
 	'connections': 'соединений',
 	'not installed': 'не установлен',
-	'Connections to the server (speed / stealth)': 'Соединений к серверу (скорость / скрытность)',
+	'Turn intercept off': 'Выключить перехват',
+	'Turn intercept on': 'Включить перехват',
+	'Server connections': 'Соединения с сервером',
+	'Connections to the server (speed / stealth)': 'Соединения с сервером (скорость / скрытность)',
 	'naive keeps N parallel TLS connections to the server. A single connection is capped at roughly 11-13 MB/s (HTTP/2 window), so several connections speed up parallel downloads. The price: N simultaneous handshakes to one domain look less browser-like; the naive author marks this mode as insecure and recommends no more than 4. 1 is the most browser-like, 3 is about three times faster on parallel traffic.':
 		'naive держит N параллельных TLS-соединений к серверу. В одном соединении потолок около 11-13 МБ/с (окно HTTP/2), поэтому несколько соединений ускоряют параллельные загрузки. Цена: N одновременных рукопожатий к одному домену выглядят менее по-браузерному; автор naive называет этот режим insecure и советует не больше 4. 1 — максимально похоже на браузер, 3 — примерно втрое быстрее на параллельном трафике.',
 	'Apply and restart': 'Применить и перезапустить',
@@ -52,7 +64,7 @@ var RU = {
 	'goes through the tunnel': 'через туннель',
 	'direct': 'напрямую',
 	'Goes direct (tunnel bypass)': 'Идут напрямую (обход туннеля)',
-	'Goes through the tunnel (own additions)': 'Идут через туннель (свои добавки)',
+	'Goes through the tunnel (own additions)': 'Идут через туннель (дополнительные домены)',
 	'Save and apply': 'Сохранить и применить',
 	'One domain per line, subdomains are inherited. Lines starting with # and empty lines are ignored; comments survive applying.':
 		'По одному домену в строке, поддомены наследуются. Строки с # и пустые игнорируются; комментарии сохраняются при применении.',
@@ -66,6 +78,7 @@ var RU = {
 	'client restarted': 'клиент перезапущен',
 	'DNS backend set to': 'DNS-бэкенд: ',
 	'QUIC (UDP 443) towards intercepted addresses': 'QUIC (UDP 443) к перехватываемым адресам',
+	'QUIC policy': 'Политика QUIC',
 	'reject (force TCP)': 'отклонять (принудительно TCP)',
 	'send directly': 'отправлять напрямую',
 	'QUIC policy set to': 'Политика QUIC: ',
@@ -75,12 +88,15 @@ var RU = {
 		'Компоненты не установлены: не удалось прочитать состояние из naive-ctl. Установите пакет или проверьте, что /usr/bin/naive-ctl исполняемый.',
 	'Unable to write the list': 'Не удалось записать список',
 	'Unable to check': 'Не удалось проверить',
-	'Turn intercept off': 'Выключить перехват',
-	'Turn intercept on': 'Включить перехват',
 	'in the bypass list': 'в списке обхода',
-	'in your tunnel additions': 'в своих добавках для туннеля',
+	'in your tunnel additions': 'в дополнительных доменах для туннеля',
 	'in the big intercept list': 'в большом списке перехвата',
-	'not in any list -> direct': 'ни в одном списке -> напрямую'
+	'not in any list -> direct': 'ни в одном списке -> напрямую',
+	'Interception': 'Перехват',
+	'Traffic counters': 'Счётчики трафика',
+	'Lists in use': 'Используемые списки',
+	'Bypass list': 'Список обхода',
+	'Tunnel additions': 'Дополнительные домены для туннеля'
 };
 
 var lang = (navigator.language || navigator.userLanguage || '').toLowerCase();
@@ -109,6 +125,46 @@ function humanBytes(n) {
 	var units = [ 'B', 'KB', 'MB', 'GB' ], i = 0;
 	while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
 	return (i ? n.toFixed(1) : n) + ' ' + units[i];
+}
+
+/* Explanations are long; showing them inline turned the page into a wall of
+ * text. A one-character badge carrying the text in the title attribute keeps
+ * the information reachable without occupying the layout. */
+function hint(text) {
+	return E('span', {
+		'class': 'ifacebadge',
+		style: 'margin-left:6px;cursor:help;opacity:.75',
+		title: tr(text)
+	}, [ 'i' ]);
+}
+
+/* LuCI themes style ul.cbi-tabmenu; panes are toggled directly so the layout
+ * does not depend on a particular theme's tab container rules. */
+function buildTabs(defs) {
+	var items = [];
+	var menu = E('ul', { 'class': 'cbi-tabmenu' });
+	var panes = [];
+
+	defs.forEach(function(def, idx) {
+		var li = E('li', { 'class': (idx === 0) ? 'cbi-tab' : 'cbi-tab-disabled' }, [
+			E('a', { href: '#' }, [ def.title ])
+		]);
+		var pane = E('div', { style: (idx === 0) ? '' : 'display:none' }, [ def.content ]);
+
+		li.addEventListener('click', function(ev) {
+			ev.preventDefault();
+			items.forEach(function(it, j) {
+				it.li.className = (j === idx) ? 'cbi-tab' : 'cbi-tab-disabled';
+				it.pane.style.display = (j === idx) ? '' : 'none';
+			});
+		});
+
+		menu.appendChild(li);
+		items.push({ li: li, pane: pane });
+		panes.push(pane);
+	});
+
+	return E('div', {}, [ menu ].concat(panes));
 }
 
 return view.extend({
@@ -152,14 +208,23 @@ return view.extend({
 		}
 		if (this.missing) this.missing.style.display = 'none';
 
-		var stateText, stateClass;
-		if (st.state === 'up') { stateText = tr('intercept enabled'); stateClass = 'label success'; }
-		else if (st.state === 'off') { stateText = tr('disabled manually'); stateClass = 'label'; }
-		else if (st.state === 'down') { stateText = tr('tunnel unavailable — traffic goes direct'); stateClass = 'label warning'; }
-		else { stateText = tr('unknown'); stateClass = 'label'; }
+		var stateText, stateClass, bannerColor;
+		if (st.state === 'up') {
+			stateText = tr('intercept enabled'); stateClass = 'label success'; bannerColor = '#2e7d32';
+		}
+		else if (st.state === 'off') {
+			stateText = tr('disabled manually'); stateClass = 'label'; bannerColor = '#616161';
+		}
+		else if (st.state === 'down') {
+			stateText = tr('tunnel unavailable — traffic goes direct'); stateClass = 'label warning'; bannerColor = '#ef6c00';
+		}
+		else {
+			stateText = tr('unknown'); stateClass = 'label'; bannerColor = '#616161';
+		}
 
 		c.state.className = stateClass;
 		c.state.textContent = stateText;
+		c.banner.style.borderLeftColor = bannerColor;
 		c.exit.textContent = st.exit_ip || '—';
 		c.vps.textContent = st.vps_ip || '—';
 		c.tunnel.textContent = (st.tunnel_pid && st.tunnel_pid !== '0')
@@ -170,12 +235,17 @@ return view.extend({
 		c.counters.textContent = (st.packets || 0) + ' / ' + humanBytes(st.bytes);
 		c.lists.textContent = (st.direct_lines || 0) + ' / ' + (st.proxy_lines || 0) + ' / ' + (st.biglist_lines || 0);
 		c.dns.textContent = st.dns_backend || tr('not installed');
-		c.toggle.textContent = tr((st.enabled === '1') ? 'Turn intercept off' : 'Turn intercept on');
+
+		var on = (st.enabled === '1');
+		c.toggle.textContent = tr(on ? 'Turn intercept off' : 'Turn intercept on');
+		c.toggle.className = 'cbi-button ' + (on ? 'cbi-button-negative' : 'cbi-button-apply');
 	},
 
-	row: function(label, node) {
+	row: function(label, node, tooltip) {
 		return E('tr', { 'class': 'tr' }, [
-			E('td', { 'class': 'td left', style: 'width:38%' }, [ label ]),
+			E('td', { 'class': 'td left', style: 'width:38%' }, [
+				label, tooltip ? hint(tooltip) : ''
+			]),
 			E('td', { 'class': 'td left' }, [ node ])
 		]);
 	},
@@ -192,7 +262,7 @@ return view.extend({
 		]);
 
 		this.cells = {
-			state: E('span', { 'class': 'label' }, [ '—' ]),
+			state: E('span', { 'class': 'label', style: 'font-size:14px;padding:4px 10px' }, [ '—' ]),
 			exit: E('span', {}, [ '—' ]),
 			vps: E('span', {}, [ '—' ]),
 			tunnel: E('span', {}, [ '—' ]),
@@ -201,7 +271,11 @@ return view.extend({
 			counters: E('span', {}, [ '—' ]),
 			lists: E('span', {}, [ '—' ]),
 			dns: E('span', {}, [ '—' ]),
-			toggle: E('button', { 'class': 'cbi-button cbi-button-action' }, [ tr('Turn intercept on') ])
+			toggle: E('button', {
+				'class': 'cbi-button cbi-button-apply',
+				style: 'font-size:15px;font-weight:600;padding:12px 24px;min-width:17em'
+			}, [ tr('Turn intercept on') ]),
+			banner: null
 		};
 		var c = this.cells;
 
@@ -211,19 +285,46 @@ return view.extend({
 				tr(turnOn ? 'Intercept is on' : 'Intercept is off — traffic goes direct'));
 		});
 
+		/* --- overview tab --- */
+		var banner = E('div', {
+			'class': 'cbi-section',
+			style: 'border-left:6px solid #616161;padding:10px 14px'
+		}, [
+			E('div', { style: 'display:flex;align-items:center;flex-wrap:wrap;gap:14px' }, [
+				c.toggle,
+				E('div', {}, [ c.state ])
+			])
+		]);
+		c.banner = banner;
+
 		var statusTable = E('table', { 'class': 'table' }, [
-			this.row(tr('State'), c.state),
-			this.row(tr('Tunnel'), c.tunnel),
-			this.row(tr('Exit IP (through tunnel)'), c.exit),
-			this.row(tr('Server address'), c.vps),
-			this.row(tr('DNS backend'), c.dns),
-			this.row(tr('Rules'), c.rules),
-			this.row(tr('Address sets'), c.sets),
-			this.row(tr('Through the tunnel'), c.counters),
-			this.row(tr('Lists'), c.lists)
+			this.row(tr('Tunnel'), c.tunnel,
+				'naive keeps N parallel TLS connections to the server. A single connection is capped at roughly 11-13 MB/s (HTTP/2 window), so several connections speed up parallel downloads. The price: N simultaneous handshakes to one domain look less browser-like; the naive author marks this mode as insecure and recommends no more than 4. 1 is the most browser-like, 3 is about three times faster on parallel traffic.'),
+			this.row(tr('Exit IP (through tunnel)'), c.exit,
+				'The address the tunnel exits with, taken from the server response. If it does not match the server address, interception is running without the tunnel.'),
+			this.row(tr('Server address'), c.vps,
+				'The address the client connects to, as resolved or pinned in the configuration.'),
+			this.row(tr('DNS backend'), c.dns,
+				'Domain lists are turned into address sets by the DNS resolver. auto picks smartdns when present, otherwise the stock dnsmasq (requires dnsmasq-full for nftset support).'),
+			this.row(tr('Rules'), c.rules,
+				'Number of interception rules in the nat table that redirect traffic of the tracked addresses to the local client port.'),
+			this.row(tr('Address sets'), c.sets,
+				'Element counts of the three nftables sets: intercepted large list, static addresses and bypass addresses.'),
+			this.row(tr('Through the tunnel'), c.counters,
+				'Packets and bytes matched by the redirect rules since the rules were applied.'),
+			this.row(tr('Lists'), c.lists,
+				'Line counts of the bypass list, the tunnel additions and the large intercept list.')
 		]);
 
-		/* --- connections to the server --- */
+		var overviewTab = E([
+			banner,
+			E('div', { 'class': 'cbi-section' }, [
+				E('h3', {}, [ tr('Status') ]),
+				statusTable
+			])
+		]);
+
+		/* --- settings tab --- */
 		var concSelect = E('select', { 'class': 'cbi-input-select' },
 			[ 1, 2, 3, 4, 5, 6, 7, 8 ].map(function(n) {
 				return E('option', { value: String(n) }, [ String(n) ]);
@@ -236,7 +337,12 @@ return view.extend({
 			return self.call([ 'set-concurrency', n ], tr('Connections set to') + n + ' (' + tr('client restarted') + ')');
 		});
 
-		/* --- DNS backend --- */
+		var concSection = E('div', { 'class': 'cbi-section' }, [
+			E('h3', {}, [ tr('Server connections'), hint('naive keeps N parallel TLS connections to the server. A single connection is capped at roughly 11-13 MB/s (HTTP/2 window), so several connections speed up parallel downloads. The price: N simultaneous handshakes to one domain look less browser-like; the naive author marks this mode as insecure and recommends no more than 4. 1 is the most browser-like, 3 is about three times faster on parallel traffic.') ]),
+			E('div', {}, [ concSelect, ' ', concApply,
+				E('span', { style: 'margin-left:12px;opacity:.7' }, [ tr('current') + ': ' + (st.concurrency || 1) ]) ])
+		]);
+
 		var BACKENDS = [ 'auto', 'smartdns', 'dnsmasq', 'none' ];
 		var dnsSelect = E('select', { 'class': 'cbi-input-select' },
 			BACKENDS.map(function(b) { return E('option', { value: b }, [ b ]); }));
@@ -247,9 +353,9 @@ return view.extend({
 			return self.call([ 'set-dns', dnsSelect.value ], tr('DNS backend set to') + dnsSelect.value);
 		});
 
-		var dnsCheckBtn = E('button', { 'class': 'cbi-button' }, [ tr('Check backend') ]);
 		var dnsCheckOut = E('span', { style: 'margin-left:12px;opacity:.8' },
 			[ dnsCheck.ok === '1' ? ('ok: ' + (dnsCheck.backend || '')) : (dnsCheck.message || '') ]);
+		var dnsCheckBtn = E('button', { 'class': 'cbi-button' }, [ tr('Check backend') ]);
 		dnsCheckBtn.addEventListener('click', function() {
 			return fs.exec('/usr/bin/naive-ctl', [ 'dns-check' ]).then(function(res) {
 				var r = parseKV(res.stdout);
@@ -259,20 +365,11 @@ return view.extend({
 			});
 		});
 
-		var concSection = E('div', { 'class': 'cbi-section' }, [
-			E('h3', {}, [ tr('Connections to the server (speed / stealth)') ]),
-			E('p', { 'class': 'cbi-section-descr' }, [ tr('naive keeps N parallel TLS connections to the server. A single connection is capped at roughly 11-13 MB/s (HTTP/2 window), so several connections speed up parallel downloads. The price: N simultaneous handshakes to one domain look less browser-like; the naive author marks this mode as insecure and recommends no more than 4. 1 is the most browser-like, 3 is about three times faster on parallel traffic.') ]),
-			E('div', {}, [ concSelect, ' ', concApply,
-				E('span', { style: 'margin-left:12px;opacity:.7' }, [ tr('current') + ': ' + (st.concurrency || 1) ]) ])
-		]);
-
 		var dnsSection = E('div', { 'class': 'cbi-section' }, [
-			E('h3', {}, [ tr('DNS backend (domain routing)') ]),
-			E('p', { 'class': 'cbi-section-descr' }, [ tr('Domain lists are turned into address sets by the DNS resolver. auto picks smartdns when present, otherwise the stock dnsmasq (requires dnsmasq-full for nftset support).') ]),
+			E('h3', {}, [ tr('DNS backend'), hint('Domain lists are turned into address sets by the DNS resolver. auto picks smartdns when present, otherwise the stock dnsmasq (requires dnsmasq-full for nftset support).') ]),
 			E('div', {}, [ dnsSelect, ' ', dnsApply, ' ', dnsCheckBtn, dnsCheckOut ])
 		]);
 
-		/* --- QUIC (UDP/443) policy --- */
 		var QUIC_POLICIES = [ 'reject', 'direct' ];
 		var quicSelect = E('select', { 'class': 'cbi-input-select' },
 			QUIC_POLICIES.map(function(v) {
@@ -286,13 +383,14 @@ return view.extend({
 		});
 
 		var quicSection = E('div', { 'class': 'cbi-section' }, [
-			E('h3', {}, [ tr('QUIC (UDP 443) towards intercepted addresses') ]),
-			E('p', { 'class': 'cbi-section-descr' }, [ tr('naive carries TCP only, therefore UDP/443 cannot be proxied. With reject the client receives an ICMP port unreachable and switches to TCP, which is intercepted, within milliseconds; the hostname does not leave the router in plaintext. With send directly the packet is not touched: HTTP/3 keeps working for addresses reachable without the tunnel, while for a blocked destination the handshake fails at the provider and the hostname is visible to it, and the client falls back to TCP only after its own timeout.') ]),
+			E('h3', {}, [ tr('QUIC policy'), hint('naive carries TCP only, therefore UDP/443 cannot be proxied. With reject the client receives an ICMP port unreachable and switches to TCP, which is intercepted, within milliseconds; the hostname does not leave the router in plaintext. With send directly the packet is not touched: HTTP/3 keeps working for addresses reachable without the tunnel, while for a blocked destination the handshake fails at the provider and the hostname is visible to it, and the client falls back to TCP only after its own timeout.') ]),
 			E('div', {}, [ quicSelect, ' ', quicApply,
 				E('span', { style: 'margin-left:12px;opacity:.7' }, [ tr('current') + ': ' + (st.quic_policy || 'reject') ]) ])
 		]);
 
-		/* --- domain check --- */
+		var settingsTab = E([ concSection, dnsSection, quicSection ]);
+
+		/* --- routes tab --- */
 		var checkInput = E('input', {
 			'class': 'cbi-input-text',
 			style: 'width:60%;min-width:220px',
@@ -323,10 +421,9 @@ return view.extend({
 			});
 		}
 
-		/* --- list editors --- */
-		function listSection(title, description, path, fallbackPath, content, applyNote) {
+		function listSection(title, path, fallbackPath, content, applyNote, tooltip) {
 			var area = E('textarea', {
-				rows: 14,
+				rows: 12,
 				style: 'width:100%;font-family:monospace;font-size:12px',
 				spellcheck: 'false'
 			}, [ content || '' ]);
@@ -344,24 +441,34 @@ return view.extend({
 			});
 
 			return E('div', { 'class': 'cbi-section' }, [
-				E('h3', {}, [ tr(title) ]),
-				E('p', { 'class': 'cbi-section-descr' }, [ tr(description) ]),
+				E('h3', {}, [ tr(title), tooltip ? hint(tooltip) : '' ]),
 				area,
 				E('div', { style: 'margin-top:8px' }, [ save ])
 			]);
 		}
 
+		var LIST_HINT = 'One domain per line, subdomains are inherited. Lines starting with # and empty lines are ignored; comments survive applying.';
+
 		var directSection = listSection(
 			'Goes direct (tunnel bypass)',
-			'One domain per line, subdomains are inherited. Lines starting with # and empty lines are ignored; comments survive applying.',
 			'/etc/naive-routing/direct_domains.txt', '/etc/naive/direct_domains.txt', data[1],
-			'Bypass list applied, rules and domain sets reloaded');
+			'Bypass list applied, rules and domain sets reloaded', LIST_HINT);
 
 		var proxySection = listSection(
 			'Goes through the tunnel (own additions)',
-			'One domain per line, subdomains are inherited. Lines starting with # and empty lines are ignored; comments survive applying.',
 			'/etc/naive-routing/proxy_domains.txt', '/etc/naive/proxy_domains.txt', data[2],
-			'Tunnel list applied, rules and domain sets reloaded');
+			'Tunnel list applied, rules and domain sets reloaded', LIST_HINT);
+
+		var routesTab = E([
+			E('div', { 'class': 'cbi-section' }, [
+				E('h3', {}, [ tr('Where will a domain go'), hint('Checks the lists and shows the decision: tunnel or direct.') ]),
+				E('div', {}, [ checkInput, ' ',
+					E('button', { 'class': 'cbi-button cbi-button-action', click: doCheck }, [ tr('Check') ]) ]),
+				checkResult
+			]),
+			directSection,
+			proxySection
+		]);
 
 		poll.add(function() { return self.refresh(); }, 5);
 
@@ -369,29 +476,12 @@ return view.extend({
 
 		return E([
 			E('h2', {}, [ tr('Naiveproxy Routing') ]),
-			E('p', { 'class': 'cbi-section-descr' }, [
-				tr('Routing state') + ': ' +
-				tr('intercept enabled') + ' / ' + tr('disabled manually') + ' / ' +
-				tr('tunnel unavailable — traffic goes direct')
-			]),
 			this.missing,
-			E('div', { 'class': 'cbi-section' }, [
-				E('h3', {}, [ tr('State') ]),
-				statusTable,
-				E('div', { style: 'margin-top:10px' }, [ c.toggle ])
-			]),
-			concSection,
-			dnsSection,
-			quicSection,
-			E('div', { 'class': 'cbi-section' }, [
-				E('h3', {}, [ tr('Where will a domain go') ]),
-				E('p', { 'class': 'cbi-section-descr' }, [ tr('Checks the lists and shows the decision: tunnel or direct.') ]),
-				E('div', {}, [ checkInput, ' ',
-					E('button', { 'class': 'cbi-button cbi-button-action', click: doCheck }, [ tr('Check') ]) ]),
-				checkResult
-			]),
-			directSection,
-			proxySection
+			buildTabs([
+				{ title: tr('Overview'), content: overviewTab },
+				{ title: tr('Settings'), content: settingsTab },
+				{ title: tr('Routes'), content: routesTab }
+			])
 		]);
 	},
 

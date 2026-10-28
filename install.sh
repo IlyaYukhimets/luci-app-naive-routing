@@ -57,17 +57,12 @@ install)
 		copy "$PKG/root/etc/config/naive_routing" /etc/config/naive_routing
 	fi
 
-	echo "==> cron entries"
-	for entry in \
-		"* * * * * /usr/libexec/naive-routing/health.sh" \
-		"30 3 * * * /usr/libexec/naive-routing/update-ips.sh" \
-		"40 3 * * * /usr/libexec/naive-routing/update-domains.sh"
-	do
-		CRON="$ROOT/etc/crontabs/root"
-		mkdir -p "$(dirname "$CRON")"
-		grep -qF "$entry" "$CRON" 2>/dev/null || echo "$entry" >> "$CRON"
-	done
-	[ -z "$ROOT" ] && { /etc/init.d/cron reload >/dev/null 2>&1 || /etc/init.d/cron restart >/dev/null 2>&1; }
+	# The watchdog and the list updaters are procd instances of the init
+	# script, so no crontab entries are created any more.
+	echo "==> enabling the service"
+	if [ -z "$ROOT" ]; then
+		/etc/init.d/naive-routing enable >/dev/null 2>&1 || true
+	fi
 
 	echo "==> restarting services"
 	if [ -z "$ROOT" ]; then
@@ -81,7 +76,6 @@ install)
 	echo "  uci set naive_routing.settings.proxy_url='https://user:password@vps.example.com'"
 	echo "  uci commit naive_routing"
 	echo "  /etc/init.d/naive-routing enable && /etc/init.d/naive-routing start"
-	echo "  /usr/libexec/naive-routing/health.sh"
 	;;
 uninstall)
 	echo "==> uninstalling luci-app-naive-routing"
@@ -94,6 +88,7 @@ uninstall)
 	rm -f "$ROOT"/usr/share/luci/menu.d/luci-app-naive-routing.json
 	rm -f "$ROOT"/usr/share/rpcd/acl.d/luci-app-naive-routing.json
 	rm -f "$ROOT"/www/luci-static/resources/view/naive_routing/overview.js
+	# Legacy cleanup: versions up to 1.0.3 scheduled the watchdog through cron.
 	sed -i '/naive-routing/d' /etc/crontabs/root 2>/dev/null || true
 	/etc/init.d/cron reload >/dev/null 2>&1 || true
 	fw4 reload >/dev/null 2>&1 || true

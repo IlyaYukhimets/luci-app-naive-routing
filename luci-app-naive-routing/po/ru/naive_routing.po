@@ -171,3 +171,33 @@ msgstr "Политика QUIC"
 
 msgid "naive carries TCP only, therefore UDP/443 cannot be proxied. With reject the client receives an ICMP port unreachable and switches to TCP, which is intercepted, within milliseconds; the hostname does not leave the router in plaintext. With send directly the packet is not touched: HTTP/3 keeps working for addresses reachable without the tunnel, while for a blocked destination the handshake fails at the provider and the hostname is visible to it, and the client falls back to TCP only after its own timeout."
 msgstr "naive передаёт только TCP, поэтому UDP/443 проксировать нечем. При отклонении клиент получает ICMP port unreachable и за миллисекунды переходит на TCP, который перехватывается; имя узла при этом не уходит от роутера открытым текстом. При отправке напрямую пакет не трогается: HTTP/3 продолжает работать для адресов, доступных без туннеля, но для заблокированного адреса рукопожатие обрывается у провайдера и имя узла ему видно, а клиент переходит на TCP только по своему таймауту."
+
+msgid "Components are not installed: unable to read state from naive-ctl. Install the package or check that /usr/bin/naive-ctl is executable."
+msgstr "Компоненты не установлены: не удалось прочитать состояние из naive-ctl. Установите пакет или проверьте, что /usr/bin/naive-ctl исполняемый."
+
+msgid "Domain lists are turned into address sets by the DNS resolver. auto picks smartdns when present, otherwise the stock dnsmasq (requires dnsmasq-full for nftset support)."
+msgstr "Доменные списки превращаются в наборы адресов силами DNS-сервера. auto выбирает smartdns, если он есть, иначе штатный dnsmasq (для поддержки nftset нужен dnsmasq-full)."
+
+msgid "Overview"
+msgstr "Основное"
+
+msgid "QUIC policy"
+msgstr "Политика QUIC"
+
+msgid "Routes"
+msgstr "Маршруты"
+
+msgid "Server connections"
+msgstr "Соединения с сервером"
+
+msgid "Settings"
+msgstr "Настройки"
+
+msgid "Status"
+msgstr "Состояние"
+
+msgid "Turn intercept on"
+msgstr "Включить перехват"
+
+msgid "naive keeps N parallel TLS connections to the server. A single connection is capped at roughly 11-13 MB/s (HTTP/2 window), so several connections speed up parallel downloads. The price: N simultaneous handshakes to one domain look less browser-like; the naive author marks this mode as insecure and recommends no more than 4. 1 is the most browser-like, 3 is about three times faster on parallel traffic."
+msgstr "naive держит N параллельных TLS-соединений к серверу. В одном соединении потолок около 11-13 МБ/с (окно HTTP/2), поэтому несколько соединений ускоряют параллельные загрузки. Цена: N одновременных рукопожатий к одному домену выглядят менее по-браузерному; автор naive называет этот режим insecure и советует не больше 4. 1 — максимально похоже на браузер, 3 — примерно втрое быстрее на параллельном трафике."

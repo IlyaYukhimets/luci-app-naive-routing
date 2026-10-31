@@ -85,10 +85,10 @@ start_service() {
 	uh=$(opt update_hour); [ -n "$uh" ] || uh=3
 	um=$(opt update_min);  [ -n "$um" ] || um=30
 	if [ "$upd" = "1" ]; then
-		local wait
-		wait=$(minutes_until "$uh" "$um")
+		local wait_min
+		wait_min=$(minutes_until "$uh" "$um")
 		procd_open_instance lists
-		procd_set_param command /bin/sh -c "sleep $((delay * 60)); while :; do \
+		procd_set_param command /bin/sh -c "sleep $((wait_min * 60)); while :; do \
 			$LIBEXEC/update-ips.sh >/dev/null 2>&1; \
 			$LIBEXEC/update-domains.sh >/dev/null 2>&1; \
 			sleep 86400; done"

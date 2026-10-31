@@ -110,11 +110,11 @@ The package consists of shell scripts and JavaScript only and is built with
 
 ```
 # OpenWrt 24.10 and earlier
-opkg update && opkg install ./luci-app-naive-routing_1.1.1-r1_all.ipk
+opkg update && opkg install ./luci-app-naive-routing_1.1.2-r1_all.ipk
 
 # OpenWrt 25.x: the artifacts are not signed by a key present in the router, hence
 # --allow-untrusted
-apk add --allow-untrusted ./luci-app-naive-routing-1.1.1-r1.apk
+apk add --allow-untrusted ./luci-app-naive-routing-1.1.2-r1.apk
 ```
 
 The `naiveproxy` client is not part of the package and is not installed automatically, see
@@ -227,7 +227,7 @@ rm -f /usr/share/luci/menu.d/luci-app-naive-routing.json \
       /usr/share/rpcd/acl.d/luci-app-naive-routing.json
 sed -i '/naive-routing\|naive-ctl/d' /etc/crontabs/root   # cron entries of the previous setup
 /etc/init.d/naive stop; /etc/init.d/naive disable 2>/dev/null  # previous hand-written init script
-apk add --allow-untrusted ./luci-app-naive-routing-1.1.1-r1.apk
+apk add --allow-untrusted ./luci-app-naive-routing-1.1.2-r1.apk
 cp /root/naive_routing.backup /etc/config/naive_routing
 /etc/init.d/naive-routing enable && /etc/init.d/naive-routing start
 ```
